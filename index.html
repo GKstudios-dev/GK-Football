@@ -903,6 +903,24 @@ footer a{color:var(--floodlight);}
   padding:16px;width:220px;box-shadow:0 14px 34px rgba(0,0,0,.45);
 }
 
+/* ============ SCROLL TO TOP ============ */
+.scroll-top-btn{
+  position:fixed;right:20px;bottom:20px;z-index:55;
+  width:44px;height:44px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--pitch-dark);color:var(--floodlight);
+  border:1px solid var(--floodlight-dim);
+  box-shadow:0 8px 22px rgba(0,0,0,.4);
+  opacity:0;pointer-events:none;
+  transform:translateY(8px);
+  transition:opacity .2s, transform .2s;
+}
+.scroll-top-btn.show{opacity:1;pointer-events:auto;transform:translateY(0);}
+.scroll-top-btn:hover{background:var(--floodlight);color:var(--ink);border-color:var(--floodlight);}
+.scroll-top-btn svg{width:20px;height:20px;}
+:root[data-theme="light"] .scroll-top-btn{background:#1F4F32;color:#fff;border-color:#1F4F32;}
+:root[data-theme="light"] .scroll-top-btn:hover{background:var(--floodlight);color:var(--ink);}
+
 /* ============ RICH TEXT EDITOR ============ */
 .rich-toolbar{display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;}
 .rich-toolbar button{
@@ -1027,6 +1045,10 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
   <div class="ticker-track" id="tickerTrack"></div>
 </div>
 
+<button class="scroll-top-btn" id="scrollTopBtn" aria-label="Scroll to top" title="Back to top">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+</button>
+
 <nav class="sidebar" id="sidebar" aria-label="Categories">
   <div class="sidebar-head">
     <span class="display">Menu</span>
@@ -1039,6 +1061,10 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
   <div id="sidebarAccount"></div>
 
   <div class="nav-section-label">Categories</div>
+  <a href="#" class="nav-item nav-home-link">
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
+    Home
+  </a>
   <a href="#" class="nav-item" data-cat="all">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
     All Stories
@@ -1152,6 +1178,10 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
            the existing nav-item[data-cat] handlers below. -->
       <aside class="feed-rail-left" aria-label="Categories">
         <div class="nav-section-label">Categories</div>
+        <a href="#" class="nav-item nav-home-link">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
+          Home
+        </a>
         <a href="#" class="nav-item" data-cat="all">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           All Stories
@@ -1268,7 +1298,9 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
 
     <div class="field-row">
       <div class="field">
-        <label for="f_image_file">Image</label>
+        <label for="f_image_url">Image URL</label>
+        <input id="f_image_url" type="url" placeholder="Paste a direct image link (e.g. from your GitHub Pages images folder)">
+        <label for="f_image_file" style="margin-top:12px;">Or upload a file instead</label>
         <input id="f_image_file" type="file" accept="image/*">
         <img id="f_image_preview" hidden style="width:100%;max-height:220px;object-fit:cover;border-radius:var(--radius);margin-top:10px;">
         <label for="f_alt" style="margin-top:12px;">Image alt text</label>
@@ -1779,6 +1811,7 @@ function renderSidebarAccount(){
         </span>
       </button>`;
     document.getElementById('sidebarAccountBtn').addEventListener('click', ()=>{
+      if(!confirm("Sign out? You'll need to sign in again to like or comment on articles.")) return;
       firebase.auth().signOut();
       closeSidebar();
     });
@@ -1852,7 +1885,14 @@ document.getElementById('authSubmit').addEventListener('click', ()=>{
     : firebase.auth().signInWithEmailAndPassword(email, pass);
 
   method
-    .then(()=>{ closeAuthModal(); })
+    .then(()=>{
+      closeAuthModal();
+      // Signup sets displayName in a step just after account creation
+      // (see above) — onAuthStateChanged already fired and drew the
+      // sidebar before that finished, so it re-renders here to pick up
+      // the username instead of continuing to show the email.
+      renderSidebarAccount();
+    })
     .catch(err=>{
       if(err.code === 'auth/email-already-in-use'){
         errBox.textContent = 'That email already has an account — try signing in instead.';
@@ -3051,9 +3091,31 @@ document.getElementById('linkPickerSearch').addEventListener('input', (e)=> rend
    Firestore's 1MB-per-document limit).
    ========================================================= */
 let currentImageDataUrl = null;
+
+// URL field — the preferred path now that images live on GitHub Pages
+// instead of getting embedded as base64. Whichever of the two image
+// inputs (URL or file) was touched most recently wins; typing a URL
+// clears any previously chosen file so they can't both silently apply.
+document.getElementById('f_image_url').addEventListener('input', (e)=>{
+  const url = e.target.value.trim();
+  const preview = document.getElementById('f_image_preview');
+  if(!url){
+    currentImageDataUrl = null;
+    preview.hidden = true;
+    return;
+  }
+  document.getElementById('f_image_file').value = '';
+  currentImageDataUrl = url;
+  preview.src = url;
+  preview.hidden = false;
+});
+
 document.getElementById('f_image_file').addEventListener('change', (e)=>{
   const file = e.target.files[0];
   if(!file) return;
+  // A file was picked — clear the URL field so it doesn't silently
+  // override this upload the next time publish runs.
+  document.getElementById('f_image_url').value = '';
   const reader = new FileReader();
   reader.onload = (ev)=>{
     const img = new Image();
@@ -3084,7 +3146,7 @@ function resetWriterForm(){
   editingPostId = null;
   document.getElementById('writerHeading').textContent = 'Write a new post';
   document.getElementById('publishBtn').textContent = 'Publish post';
-  ['f_title','f_subtitle','f_meta','f_keyword','f_alt','f_snippet','f_tags'].forEach(id=> document.getElementById(id).value='');
+  ['f_title','f_subtitle','f_meta','f_keyword','f_alt','f_snippet','f_tags','f_image_url'].forEach(id=> document.getElementById(id).value='');
   document.getElementById('f_author').value = 'The Football Post Staff';
   document.getElementById('f_body_rich').innerHTML = '';
   document.getElementById('f_category').value = 'club';
@@ -3117,6 +3179,11 @@ function loadPostIntoWriter(post){
   document.getElementById('f_footballNow').checked = !!post.footballNow;
   currentImageDataUrl = post.image || null;
   const preview = document.getElementById('f_image_preview');
+  const urlField = document.getElementById('f_image_url');
+  // Only populate the URL field when the stored image actually is a
+  // URL (older posts may still have an embedded base64 image, which
+  // has nothing sensible to show in a URL text field).
+  urlField.value = (post.image && !post.image.startsWith('data:image')) ? post.image : '';
   if(post.image){ preview.src = post.image; preview.hidden = false; } else { preview.hidden = true; }
   document.getElementById('f_body_rich').innerHTML = bodyToHtml(post.body);
   runSeoCheck();
@@ -3365,6 +3432,19 @@ function setCategory(cat){
   renderFeed();
 }
 
+// "Home" sidebar/rail links — same destination as tapping the "Home"
+// tab at the top of the feed, matching the app drawer's Home item.
+document.querySelectorAll('.nav-home-link').forEach(el=>{
+  el.addEventListener('click', (e)=>{
+    e.preventDefault();
+    closeSidebar();
+    state.sort = 'home';
+    activateTab(tabHome);
+    showFeed();
+    renderFeed();
+  });
+});
+
 document.querySelectorAll('.nav-item[data-cat]').forEach(el=>{
   el.addEventListener('click', (e)=>{
     e.preventDefault();
@@ -3502,6 +3582,19 @@ document.getElementById('installBtn').addEventListener('click', async ()=>{
   document.getElementById('installBtn').hidden = true;
 });
 window.addEventListener('appinstalled', ()=>{ document.getElementById('installBtn').hidden = true; });
+
+/* =========================================================
+   SCROLL TO TOP
+   Same 400px show-threshold as the app's ScrollToTopButton, so the
+   two feel consistent with each other.
+   ========================================================= */
+const scrollTopBtn = document.getElementById('scrollTopBtn');
+window.addEventListener('scroll', ()=>{
+  scrollTopBtn.classList.toggle('show', window.scrollY > 400);
+}, { passive: true });
+scrollTopBtn.addEventListener('click', ()=>{
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
 
 /* =========================================================
    INIT
