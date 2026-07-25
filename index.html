@@ -903,6 +903,19 @@ footer a{color:var(--floodlight);}
   padding:16px;width:220px;box-shadow:0 14px 34px rgba(0,0,0,.45);
 }
 
+/* ============ BBC-STYLE PRESS UNDERLINE ============
+   Matches the app's PressUnderlineController: tapping a card underlines
+   its title (and subtitle where present), and it stays underlined —
+   even after navigating away and back — until a different card is
+   tapped. Only one card is ever underlined at a time. Does not apply
+   to the trending carousel/ticker, matching the app. */
+.underlined .card-title,
+.underlined .card-subtitle{
+  text-decoration: underline;
+  text-decoration-color: currentColor;
+  text-underline-offset: 3px;
+}
+
 /* ============ SCROLL TO TOP ============ */
 .scroll-top-btn{
   position:fixed;right:20px;bottom:20px;z-index:55;
@@ -1060,11 +1073,11 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
        signed in. Filled in by renderSidebarAccount() in js/auth.js. -->
   <div id="sidebarAccount"></div>
 
-  <div class="nav-section-label">Categories</div>
   <a href="#" class="nav-item nav-home-link">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
     Home
   </a>
+  <div class="nav-section-label">Categories</div>
   <a href="#" class="nav-item" data-cat="all">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
     All Stories
@@ -1177,11 +1190,11 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
            column). Reuses .nav-item so clicks are already wired up by
            the existing nav-item[data-cat] handlers below. -->
       <aside class="feed-rail-left" aria-label="Categories">
-        <div class="nav-section-label">Categories</div>
         <a href="#" class="nav-item nav-home-link">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
           Home
         </a>
+        <div class="nav-section-label">Categories</div>
         <a href="#" class="nav-item" data-cat="all">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           All Stories
@@ -1328,6 +1341,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
         <button type="button" data-cmd="formatBlock" data-value="P">Normal</button>
         <button type="button" data-cmd="insertUnorderedList">• List</button>
         <button type="button" id="insertImageBtn">+ Image</button>
+        <button type="button" id="insertImageUrlBtn">+ Image URL</button>
         <button type="button" id="insertPostLinkBtn">🔗 Link to Article</button>
       </div>
       <input type="file" id="bodyImageInput" accept="image/*" hidden>
@@ -2222,6 +2236,28 @@ function cardsWithAds(cardsHtmlArr, every, prefix){
   return out;
 }
 
+// =========================================================
+// BBC-STYLE PRESS UNDERLINE
+// Mirrors the app's PressUnderlineController: a single globally
+// tracked "underlined" post id, in memory only (resets on page
+// reload, same lifetime as the app's ValueNotifier resetting on app
+// restart). No timer, no auto-fade — stays until a different card is
+// tapped. Deliberately excludes the trending carousel, matching the
+// app (TrendingCarousel doesn't use PressUnderlineController there).
+// =========================================================
+let underlinedPostId = null;
+
+function setUnderlinedPost(id){
+  underlinedPostId = id;
+  applyUnderlineState();
+}
+
+function applyUnderlineState(){
+  document.querySelectorAll('a[data-id]:not(.trending-slide)').forEach(el=>{
+    el.classList.toggle('underlined', underlinedPostId != null && el.dataset.id === String(underlinedPostId));
+  });
+}
+
 function cardHtml(p){
   const readBadge = p.readAt ? `<div class="read-badge">Read ${timeAgo(p.readAt)}</div>` : '<span></span>';
   const isLiked = isPostLikedByViewer(p);
@@ -2234,8 +2270,8 @@ function cardHtml(p){
         <div class="card-h-meta">
           <span class="tag ${p.category}">${CATEGORY_LABELS[p.category]}</span>
         </div>
-        <h3>${escapeHtml(p.title)}</h3>
-        <span class="snippet-h">${escapeHtml(p.snippet)}</span>
+        <h3 class="card-title">${escapeHtml(p.title)}</h3>
+        <span class="snippet-h card-subtitle">${escapeHtml(p.snippet)}</span>
       </div>
       <div class="card-h-foot">
         ${readBadge}
@@ -2261,8 +2297,8 @@ function bigBoxHtml(p){
       <div class="big-box-meta">
         <span class="tag ${p.category}">${CATEGORY_LABELS[p.category]}</span>
       </div>
-      <h2 class="big-box-title">${escapeHtml(p.title)}</h2>
-      <p class="big-box-snippet">${escapeHtml(p.snippet)}</p>
+      <h2 class="big-box-title card-title">${escapeHtml(p.title)}</h2>
+      <p class="big-box-snippet card-subtitle">${escapeHtml(p.snippet)}</p>
       <div class="big-box-foot">
         <span class="read-badge">${timeAgo(p.date)}</span>
         <div class="big-box-actions">
@@ -2280,6 +2316,7 @@ function attachBigBoxHandlers(container){
       if(e.target.closest('.big-box-like')) return;
       if(e.target.closest('.big-box-comment')) return;
       e.preventDefault();
+      setUnderlinedPost(box.dataset.id);
       openArticle(box.dataset.id);
     });
     const bubble = box.querySelector('.big-box-comment');
@@ -2289,6 +2326,7 @@ function attachBigBoxHandlers(container){
       openArticleComments(box.dataset.id);
     });
   });
+  applyUnderlineState();
 }
 
 // "Recommended for you" scroller card — image on top (140x90), title below.
@@ -2296,16 +2334,18 @@ function recCardHtml(p){
   return `
     <a class="rec-card" href="#" data-id="${p.id}">
       <img src="${p.image}" alt="${escapeHtml(p.imageAlt||'')}" loading="lazy">
-      <h4>${escapeHtml(p.title)}</h4>
+      <h4 class="card-title">${escapeHtml(p.title)}</h4>
     </a>`;
 }
 function attachRecCardHandlers(container){
   container.querySelectorAll('.rec-card').forEach(card=>{
     card.addEventListener('click', (e)=>{
       e.preventDefault();
+      setUnderlinedPost(card.dataset.id);
       openArticle(card.dataset.id);
     });
   });
+  applyUnderlineState();
 }
 
 // Picks the "Recommended for you" row: posts the admin has flagged
@@ -2344,7 +2384,7 @@ function latestCardHtml(p){
         <div class="card-h-meta">
           <span class="tag ${p.category}">${CATEGORY_LABELS[p.category]}</span>
         </div>
-        <h3>${escapeHtml(p.title)}</h3>
+        <h3 class="card-title">${escapeHtml(p.title)}</h3>
       </div>
     </a>`;
 }
@@ -2355,6 +2395,7 @@ function attachCardHandlers(container){
       if(e.target.closest('.card-h-like')) return; // like button handles its own click
       if(e.target.closest('.card-h-comment')) return; // comment bubble opens the article + comments drawer
       e.preventDefault();
+      setUnderlinedPost(card.dataset.id);
       openArticle(card.dataset.id);
     });
     const bubble = card.querySelector('.card-h-comment');
@@ -2364,6 +2405,7 @@ function attachCardHandlers(container){
       openArticleComments(card.dataset.id);
     });
   });
+  applyUnderlineState();
 }
 
 // ============ ARTICLE COMMENTS DRAWER ============
@@ -2829,7 +2871,7 @@ function relatedCardHtml(p){
   return `
     <a class="related-card" href="#" data-id="${p.id}">
       <img src="${p.image}" alt="${escapeHtml(p.imageAlt||'')}" loading="lazy">
-      <h4>${escapeHtml(p.title)}</h4>
+      <h4 class="card-title">${escapeHtml(p.title)}</h4>
     </a>`;
 }
 
@@ -2837,9 +2879,11 @@ function attachRelatedCardHandlers(container){
   container.querySelectorAll('.related-card').forEach(card=>{
     card.addEventListener('click', (e)=>{
       e.preventDefault();
+      setUnderlinedPost(card.dataset.id);
       openArticle(card.dataset.id);
     });
   });
+  applyUnderlineState();
 }
 
 function openArticle(id){
@@ -2949,6 +2993,47 @@ document.querySelectorAll('.rich-toolbar button[data-cmd]').forEach(btn=>{
   });
 });
 
+// Shared by the file-upload and URL insert paths: places the image
+// at the saved cursor position, then prompts for alt text and sets it
+// on the just-inserted <img> — accessibility/SEO info the body editor
+// had no way to attach before.
+function insertBodyImage(src){
+  const editor = document.getElementById('f_body_rich');
+  editor.focus();
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  if(savedBodyRange){
+    sel.addRange(savedBodyRange);
+  } else {
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    sel.addRange(range);
+  }
+  document.execCommand('insertImage', false, src);
+  runSeoCheck();
+
+  // Find the image that was just inserted so alt text lands on the
+  // right one rather than an earlier image already in the body.
+  const afterSel = window.getSelection();
+  let inserted = null;
+  const anchor = afterSel.anchorNode;
+  if(anchor){
+    const beforeCursor = anchor.nodeType === 3
+      ? anchor.previousSibling
+      : anchor.childNodes[afterSel.anchorOffset - 1];
+    if(beforeCursor && beforeCursor.tagName === 'IMG') inserted = beforeCursor;
+  }
+  if(!inserted){
+    const candidates = editor.querySelectorAll('img:not([alt])');
+    inserted = candidates[candidates.length - 1] || null;
+  }
+  if(inserted){
+    const alt = prompt('Describe this image (for accessibility/SEO):', '') || '';
+    inserted.setAttribute('alt', alt);
+  }
+}
+
 let savedBodyRange = null;
 document.getElementById('insertImageBtn').addEventListener('click', ()=>{
   const sel = window.getSelection();
@@ -2958,6 +3043,18 @@ document.getElementById('insertImageBtn').addEventListener('click', ()=>{
     savedBodyRange = editor.contains(range.commonAncestorContainer) ? range.cloneRange() : null;
   }
   document.getElementById('bodyImageInput').click();
+});
+
+document.getElementById('insertImageUrlBtn').addEventListener('click', ()=>{
+  const sel = window.getSelection();
+  if(sel.rangeCount > 0){
+    const range = sel.getRangeAt(0);
+    const editor = document.getElementById('f_body_rich');
+    savedBodyRange = editor.contains(range.commonAncestorContainer) ? range.cloneRange() : null;
+  }
+  const url = prompt('Paste the image URL:', '');
+  if(!url) return;
+  insertBodyImage(url.trim());
 });
 
 document.getElementById('bodyImageInput').addEventListener('change', (e)=>{
@@ -2975,21 +3072,7 @@ document.getElementById('bodyImageInput').addEventListener('change', (e)=>{
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-
-      const editor = document.getElementById('f_body_rich');
-      editor.focus();
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      if(savedBodyRange){
-        sel.addRange(savedBodyRange);
-      } else {
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        range.collapse(false);
-        sel.addRange(range);
-      }
-      document.execCommand('insertImage', false, dataUrl);
-      runSeoCheck();
+      insertBodyImage(dataUrl);
     };
     img.src = ev.target.result;
   };
