@@ -1590,6 +1590,7 @@ function startPostsFeed(){
       posts = snapshot.empty ? [] : snapshot.docs.map(d=>({ id:d.id, ...d.data() }));
       buildTicker();
       renderFeed();
+      openSharedArticleFromUrl();
       // if the article view is currently open, refresh its read-status line too
       if(!document.getElementById('articleView').hidden && currentOpenArticleId){
         refreshReadStatusUI(currentOpenArticleId);
@@ -1600,8 +1601,23 @@ function startPostsFeed(){
       posts = loadLocalPosts() || SAMPLE_POSTS.slice();
       buildTicker();
       renderFeed();
+      openSharedArticleFromUrl();
     }
   );
+}
+
+// Lets a shared link (e.g. from the app's share button) land the
+// visitor straight on the specific article instead of just the
+// homepage. Only acts once — posts arrives via a live snapshot
+// listener that can fire repeatedly, but a shared link should only
+// auto-open the article on that first arrival, not re-open it (or
+// interrupt someone who's since navigated elsewhere) on every update.
+let _sharedArticleLinkChecked = false;
+function openSharedArticleFromUrl(){
+  if(_sharedArticleLinkChecked) return;
+  _sharedArticleLinkChecked = true;
+  const postId = new URLSearchParams(location.search).get('post');
+  if(postId) openArticle(postId);
 }
 
 function addPost(newPost){
