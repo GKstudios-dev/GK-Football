@@ -586,7 +586,7 @@ main{max-width:760px;margin:0 auto;padding:26px 18px 60px;}
 .trending-carousel{position:relative;margin-bottom:6px;}
 .trending-track{position:relative;aspect-ratio:1200/628;height:auto;border-radius:12px;overflow:hidden;}
 .trending-slide{
-  position:absolute;inset:0;background-size:contain;
+  position:absolute;inset:0;background-size:cover;
 background-repeat:no-repeat;background-position:center;
   border-radius:12px;opacity:0;transition:opacity .6s ease;pointer-events:none;
   display:block;
@@ -690,7 +690,7 @@ background-repeat:no-repeat;background-position:center;
   margin-bottom:20px;
 }
 .back-btn:hover{border-color:var(--floodlight);color:var(--floodlight);}
-.article-hero{width:100%;height:260px;object-fit:cover;border-radius:var(--radius);margin-bottom:18px;}
+.article-hero{width:100%;aspect-ratio:1200/628;object-fit:cover;border-radius:var(--radius);margin-bottom:18px;}
 .article-meta{font-family:var(--mono);font-size:11px;color:var(--chalk-dim);margin-bottom:8px;display:flex;gap:10px;align-items:center;}
 .article h1{font-size:32px;line-height:1.1;margin:0 0 16px;color:var(--chalk);text-transform:none;}
 .article-body{font-size:19px;line-height:1.85;color:var(--chalk);}
@@ -984,7 +984,6 @@ footer a{color:var(--floodlight);}
   .card h3{font-size:18px;}
   .view-tab{font-size:14px;margin-right:18px;}
   .article h1{font-size:24px;}
-  .article-hero{height:180px;}
   .field-row{flex-direction:column;gap:0;}
   .sidebar{width:82%;max-width:280px;}
 }
@@ -1172,6 +1171,17 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
 
 <!-- "READ ALSO" ARTICLE-LINK PICKER (writer tool) -->
 <div id="overlay2" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:65;display:none;"></div>
+
+<!-- In-page view for Privacy Policy / Terms / About / Contact / Support —
+     mirrors the app's InAppWebScreen: a back button that returns to the
+     site instead of opening a new tab and leaving it. -->
+<div id="inPageWebOverlay" style="position:fixed;inset:0;background:var(--pitch-dark,#0E2A1B);z-index:120;display:none;flex-direction:column;">
+  <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.12);flex:0 0 auto;">
+    <button type="button" id="inPageWebBack" aria-label="Back" style="background:none;border:none;color:#fff;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;">&larr;</button>
+    <span id="inPageWebTitle" style="color:#fff;font-family:var(--body);font-size:15px;font-weight:600;"></span>
+  </div>
+  <iframe id="inPageWebFrame" src="about:blank" style="flex:1 1 auto;border:none;width:100%;background:#fff;"></iframe>
+</div>
 <div class="link-picker" id="linkPicker" hidden>
   <label for="linkPickerSearch" style="font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--chalk-dim);text-transform:uppercase;margin-bottom:6px;display:block;">Link to which article?</label>
   <input type="text" id="linkPickerSearch" placeholder="Search articles...">
@@ -2258,6 +2268,27 @@ function applyUnderlineState(){
   });
 }
 
+// Same idea as cardsWithAds, but for flat lists of big-box cards
+// (Trending / Football Now tabs): puts an explicit divider between
+// EVERY card, not just relying on the .big-box + .big-box CSS
+// adjacent-sibling rule, which silently breaks the moment an ad slot
+// gets inserted between two cards and stops them being direct
+// siblings. Never places a divider or ad right at the very end.
+function bigBoxListWithDividers(list, adEvery, prefix){
+  let out = '';
+  list.forEach((p, i)=>{
+    out += bigBoxHtml(p);
+    const position = i + 1;
+    const isLast = position === list.length;
+    if(!isLast) out += `<div class="section-divider-h"></div>`;
+    if(position % adEvery === 0 && !isLast){
+      out += adSlotHtml(`${prefix}-${position}`);
+      out += `<div class="section-divider-h"></div>`;
+    }
+  });
+  return out;
+}
+
 function cardHtml(p){
   const readBadge = p.readAt ? `<div class="read-badge">Read ${timeAgo(p.readAt)}</div>` : '<span></span>';
   const isLiked = isPostLikedByViewer(p);
@@ -2746,7 +2777,7 @@ function renderFeed(){
       return;
     }
 
-    feed.innerHTML = cardsWithAds(list.map(p=>bigBoxHtml(p)), 3, 'footballnow');
+    feed.innerHTML = bigBoxListWithDividers(list, 3, 'footballnow');
     attachBigBoxHandlers(feed);
     return;
   }
@@ -2762,7 +2793,7 @@ function renderFeed(){
     return;
   }
 
-  feed.innerHTML = cardsWithAds(list.map(p=>bigBoxHtml(p)), 3, 'trend');
+  feed.innerHTML = bigBoxListWithDividers(list, 3, 'trend');
   attachBigBoxHandlers(feed);
 }
 
@@ -3507,6 +3538,31 @@ hamburger.addEventListener('click', ()=> sidebar.classList.contains('open') ? cl
 overlay.addEventListener('click', closeSidebar);
 document.getElementById('sidebarClose').addEventListener('click', closeSidebar);
 
+// Swipe-left-to-close — the X button alone meant scrolling all the
+// way back to the top of a long drawer just to close it. Tracks
+// horizontal drag distance only; a mostly-vertical touch (someone
+// just scrolling the drawer's contents) is left alone so it doesn't
+// fight normal scrolling.
+(function(){
+  let startX = 0, startY = 0, tracking = false;
+  sidebar.addEventListener('touchstart', (e)=>{
+    if(!sidebar.classList.contains('open')) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    tracking = true;
+  }, { passive: true });
+  sidebar.addEventListener('touchmove', (e)=>{
+    if(!tracking) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+    if(dx < -70 && Math.abs(dx) > Math.abs(dy) * 1.5){
+      tracking = false;
+      closeSidebar();
+    }
+  }, { passive: true });
+  sidebar.addEventListener('touchend', ()=>{ tracking = false; });
+})();
+
 function setCategory(cat){
   state.category = cat;
   document.querySelectorAll('.nav-item[data-cat]').forEach(n=>n.classList.toggle('active', n.dataset.cat===cat));
@@ -3543,12 +3599,25 @@ document.querySelectorAll('.chip[data-cat]').forEach(el=>{
 });
 
 // Sidebar footer links (Privacy Policy / Terms / About / Contact / Support)
-// — same destinations the app's drawer opens.
+// — same destinations the app's drawer opens, but shown in-page with a
+// back button (like the app's InAppWebScreen) instead of a new tab that
+// leaves the site.
+function openInPageWeb(url, title){
+  document.getElementById('inPageWebTitle').textContent = title;
+  document.getElementById('inPageWebFrame').src = url;
+  document.getElementById('inPageWebOverlay').style.display = 'flex';
+}
+function closeInPageWeb(){
+  document.getElementById('inPageWebOverlay').style.display = 'none';
+  document.getElementById('inPageWebFrame').src = 'about:blank';
+}
+document.getElementById('inPageWebBack').addEventListener('click', closeInPageWeb);
+
 document.querySelectorAll('.nav-item[data-link]').forEach(el=>{
   el.addEventListener('click', (e)=>{
     e.preventDefault();
     closeSidebar();
-    window.open(el.dataset.link, '_blank', 'noopener');
+    openInPageWeb(el.dataset.link, el.textContent.trim());
   });
 });
 
