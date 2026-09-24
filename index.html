@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
-<title>GK Football — Club, National Team &amp; Transfer News</title>
+<title>The football Post — Club, National Team &amp; Transfer News</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0E2A1B">
 <script>
@@ -1104,23 +1104,23 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
   <!-- Footer-style links — same destinations as the app drawer
        (About Us, Privacy Policy, Terms of Use, Contact Us, Support/FAQs). -->
   <div class="sidebar-divider"></div>
-  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/GK-Football/Privacy_Policy.html">
+  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/The-Football-Post/Privacy_Policy.html">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6l7-3z"/></svg>
     Privacy Policy
   </a>
-  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/GK-Football/Terms_of_Use.html">
+  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/The-Football-Post/Terms_of_Use.html">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 3h8l4 4v14H7z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg>
     Terms of Use
   </a>
-  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/GK-Football/About_Us.html">
+  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/The-Football-Post/About_Us.html">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>
     About Us
   </a>
-  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/GK-Football/contact_us.html">
+  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/The-Football-Post/contact_us.html">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
     Contact Us
   </a>
-  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/GK-Football/support.html">
+  <a href="#" class="nav-item" data-link="https://gkstudios-dev.github.io/The-Football-Post/support.html">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 1 1 4.4 2.6c-1 .5-1.5 1-1.5 2.1M12 17h.01"/></svg>
     Support / FAQs
   </a>
@@ -1373,13 +1373,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
 
     <div class="field">
       <label style="display:inline-flex;align-items:center;gap:8px;font-family:var(--body);text-transform:none;letter-spacing:0;color:var(--chalk);">
-        <input type="checkbox" id="f_latest" style="width:auto;"> Show in "Latest" strip
-      </label>
-    </div>
-
-    <div class="field">
-      <label style="display:inline-flex;align-items:center;gap:8px;font-family:var(--body);text-transform:none;letter-spacing:0;color:var(--chalk);">
-        <input type="checkbox" id="f_footballNow" style="width:auto;"> Show in "Football Now" (breaking news — any category)
+        <input type="checkbox" id="f_footballNow" style="width:auto;"> Show in "Football Now" (breaking news, any category — also feeds the "Latest" strip and the Football Now tab)
       </label>
     </div>
 
@@ -1391,7 +1385,8 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
       <ul class="seo-checks" id="seoChecks"></ul>
     </div>
 
-    <button class="publish-btn" id="publishBtn">Publish post</button>
+    <button class="publish-btn" id="draftBtn" style="background:transparent;border:1px solid var(--floodlight-dim);color:var(--floodlight);">Save Draft</button>
+    <button class="publish-btn" id="publishBtn">Publish</button>
     <button class="cancel-btn" id="cancelWriter">Cancel</button>
   </section>
 
@@ -1456,7 +1451,7 @@ const ADMIN_EMAIL = 'keketsyorgabriel@gmail.com';
 </script>
 <script>
 const CONFIG = {
-  siteName: "GK FOOTBALL",   // <-- change the whole site's name here, nowhere else needed
+  siteName: "The Football Post",   // <-- change the whole site's name here, nowhere else needed
   copyrightYear: 2026,        // change this each year, or leave autoYear on below
   autoYear: true              // if true, footer year updates itself automatically
 };
@@ -2400,13 +2395,13 @@ function attachRecCardHandlers(container){
 // if that isn't enough to fill the row, top it up with up to 4 posts per
 // category (most recent first) from whatever's left, until `limit` is hit.
 function pickRecommended(limit=12, perCategory=4){
-  const flagged = posts
+  const flagged = publishedPosts()
     .filter(p=>p.recommended)
     .sort((a,b)=> toJSDate(b.date) - toJSDate(a.date));
   const picked = flagged.slice(0, limit);
   if(picked.length < limit){
     const usedIds = new Set(picked.map(p=>p.id));
-    const remaining = posts
+    const remaining = publishedPosts()
       .filter(p=>!usedIds.has(p.id))
       .sort((a,b)=> toJSDate(b.date) - toJSDate(a.date));
     const perCatCount = {};
@@ -2591,6 +2586,16 @@ function feedEmptyMessage(fallback){
   return fallback;
 }
 
+// Every post the site/app is allowed to show publicly — everything except
+// posts saved as a draft. Every feed, rail, ticker, search, recommended
+// and related-posts list reads from this instead of the raw `posts` array,
+// so a draft only ever shows up in the dashboard, never in front of a
+// reader. Posts with no `status` at all (older posts, pre-draft-feature)
+// count as published, same as before this feature existed.
+function publishedPosts(){
+  return posts.filter(p=>p.status !== 'draft');
+}
+
 // Fills the desktop-only right rail (BBC-style "Trending Now" / "Latest
 // Stories" / "Football Now" column). No-op on mobile/tablet since the rail
 // is hidden there anyway, but it's cheap enough to just always keep it in sync.
@@ -2598,11 +2603,11 @@ function renderDesktopRail(){
   const railEl = document.getElementById('desktopRailRight');
   if(!railEl) return;
 
-  const trending = posts.filter(p=>p.trending)
+  const trending = publishedPosts().filter(p=>p.trending)
     .sort((a,b)=> toJSDate(b.date)-toJSDate(a.date)).slice(0,5);
-  const latest = posts.slice()
+  const latest = publishedPosts()
     .sort((a,b)=> toJSDate(b.date)-toJSDate(a.date)).slice(0,6);
-  const footballNow = posts.filter(p=>p.footballNow)
+  const footballNow = publishedPosts().filter(p=>p.footballNow)
     .sort((a,b)=> toJSDate(b.date)-toJSDate(a.date)).slice(0,5);
 
   const trendHtml = trending.length ? trending.map(p=>`
@@ -2649,7 +2654,7 @@ function renderFeed(){
   const note = document.getElementById('filterNote');
   stopCarousel();
   renderDesktopRail();
-  let list = posts.slice();
+  let list = publishedPosts();
 
   if(state.category !== 'all'){
     list = list.filter(p=>p.category===state.category);
@@ -2676,17 +2681,19 @@ function renderFeed(){
   note.hidden = true;
 
   if(state.sort === 'home'){
-    const trendList = posts.filter(p=>p.trending).sort((a,b)=> toJSDate(b.date)-toJSDate(a.date));
+    const trendList = publishedPosts().filter(p=>p.trending).sort((a,b)=> toJSDate(b.date)-toJSDate(a.date));
     list.sort((a,b)=> (b.trending - a.trending) || (toJSDate(b.date)-toJSDate(a.date)));
 
     let html = buildCarouselHtml(trendList);
 
     if(list.length){
-      // "Latest" strip: posts the admin flagged via "Show in Latest strip"
-      // come first (most recent first); if fewer than 2 are flagged, fill
-      // the rest with the most recent posts not already picked here.
-      const flaggedLatest = posts
-        .filter(p=>p.latest)
+      // "Latest" strip: posts the admin flagged "Football Now" come first
+      // (most recent first) — same flag that drives the Football Now tab's
+      // full list, so a post marked Football Now shows up both places at
+      // once. If fewer than 2 are flagged, fill the rest with the most
+      // recent posts not already picked here.
+      const flaggedLatest = publishedPosts()
+        .filter(p=>p.footballNow)
         .sort((a,b)=> toJSDate(b.date) - toJSDate(a.date));
       let latestPicks = flaggedLatest.slice(0, 2);
       if(latestPicks.length < 2){
@@ -2839,7 +2846,7 @@ function renderSearchResults(){
     box.innerHTML = `<div class="empty-state">Search for articles, teams, or players</div>`;
     return;
   }
-  const results = posts.filter(p=> matchesSearch(p, query));
+  const results = publishedPosts().filter(p=> matchesSearch(p, query));
   if(!results.length){
     box.innerHTML = `<div class="empty-state">No articles found for &quot;${escapeHtml(query)}&quot;</div>`;
     return;
@@ -2852,7 +2859,7 @@ function renderSearchResults(){
    TICKER
    ========================================================= */
 function buildTicker(){
-  const items = posts.slice(0,6).map(p=>`<span><b>${CATEGORY_LABELS[p.category].toUpperCase()}</b> — ${escapeHtml(p.title)}</span>`).join('');
+  const items = publishedPosts().slice(0,6).map(p=>`<span><b>${CATEGORY_LABELS[p.category].toUpperCase()}</b> — ${escapeHtml(p.title)}</span>`).join('');
   document.getElementById('tickerTrack').innerHTML = items + items; // duplicate for seamless loop
 }
 
@@ -2899,13 +2906,13 @@ function stopReadStatusTimer(){
    single stacked list (not a grid) so it reads the same on phone and
    desktop, closer to how NYT/Yahoo-style "more stories" lists work. */
 function relatedPostsFor(p, limit = 8){
-  const sameCategory = posts
+  const sameCategory = publishedPosts()
     .filter(x => x.id !== p.id && x.category === p.category)
     .sort((a,b)=> toJSDate(b.date) - toJSDate(a.date));
   const picked = sameCategory.slice(0, limit);
   if(picked.length < limit){
     const usedIds = new Set([p.id, ...picked.map(x=>x.id)]);
-    const filler = posts
+    const filler = publishedPosts()
       .filter(x => !usedIds.has(x.id))
       .sort((a,b)=> toJSDate(b.date) - toJSDate(a.date))
       .slice(0, limit - picked.length);
@@ -2935,7 +2942,9 @@ function attachRelatedCardHandlers(container){
 
 function openArticle(id){
   const p = posts.find(x=>x.id===id);
-  if(!p) return false;
+  // Drafts are dashboard-only — never openable as a public article, even
+  // via a stale/shared link, unless you're signed in as the admin editing it.
+  if(!p || (p.status === 'draft' && !isAdmin())) return false;
   const bodyHtml = bodyToHtml(p.body);
   const isLiked = isPostLikedByViewer(p);
   const likeCount = p.likes || 0;
@@ -3275,14 +3284,13 @@ let editingPostId = null;
 function resetWriterForm(){
   editingPostId = null;
   document.getElementById('writerHeading').textContent = 'Write a new post';
-  document.getElementById('publishBtn').textContent = 'Publish post';
+  document.getElementById('publishBtn').textContent = 'Publish';
   ['f_title','f_subtitle','f_meta','f_keyword','f_alt','f_snippet','f_tags','f_image_url'].forEach(id=> document.getElementById(id).value='');
   document.getElementById('f_author').value = 'The Football Post Staff';
   document.getElementById('f_body_rich').innerHTML = '';
   document.getElementById('f_category').value = 'club';
   document.getElementById('f_trending').checked = false;
   document.getElementById('f_recommended').checked = false;
-  document.getElementById('f_latest').checked = false;
   document.getElementById('f_footballNow').checked = false;
   document.getElementById('f_image_file').value = '';
   document.getElementById('f_image_preview').hidden = true;
@@ -3292,8 +3300,8 @@ function resetWriterForm(){
 
 function loadPostIntoWriter(post){
   editingPostId = post.id;
-  document.getElementById('writerHeading').textContent = 'Edit post';
-  document.getElementById('publishBtn').textContent = 'Save changes';
+  document.getElementById('writerHeading').textContent = post.status === 'draft' ? 'Edit draft' : 'Edit post';
+  document.getElementById('publishBtn').textContent = 'Publish';
   document.getElementById('f_title').value = post.title || '';
   document.getElementById('f_subtitle').value = post.subtitle || '';
   document.getElementById('f_meta').value = post.metaDescription || post.snippet || '';
@@ -3305,7 +3313,6 @@ function loadPostIntoWriter(post){
   document.getElementById('f_category').value = post.category || 'club';
   document.getElementById('f_trending').checked = !!post.trending;
   document.getElementById('f_recommended').checked = !!post.recommended;
-  document.getElementById('f_latest').checked = !!post.latest;
   document.getElementById('f_footballNow').checked = !!post.footballNow;
   currentImageDataUrl = post.image || null;
   const preview = document.getElementById('f_image_preview');
@@ -3421,12 +3428,19 @@ function runSeoCheck(){
   label.innerHTML = (score>=80?'Looking green — ready to publish':score>=50?'Getting there — a few fixes left':'Needs work before publishing') + '<span>SEO score</span>';
 
   document.getElementById('publishBtn').disabled = !(title && body && meta);
+  // Save Draft only needs a title — the whole point is being able to save
+  // half-finished work (no image, no meta description yet) without it
+  // going live.
+  document.getElementById('draftBtn').disabled = !title;
   return score;
 }
 function scoreCheck(level,label,detail){ return {level,label,detail}; }
 function dotColor(level){ return level==='good' ? 'var(--good)' : level==='warn' ? 'var(--warn)' : 'var(--bad)'; }
 
-document.getElementById('publishBtn').addEventListener('click', ()=>{
+// Shared by both the "Save Draft" and "Publish" buttons — pulls every
+// field out of the writer form. `status` ('draft' or 'published') is
+// attached separately by whichever button's handler calls this.
+function gatherWriterFields(){
   const title = document.getElementById('f_title').value.trim();
   const subtitle = document.getElementById('f_subtitle').value.trim();
   const meta = document.getElementById('f_meta').value.trim();
@@ -3438,7 +3452,6 @@ document.getElementById('publishBtn').addEventListener('click', ()=>{
   const author = document.getElementById('f_author').value.trim() || 'The Football Post Staff';
   const trending = document.getElementById('f_trending').checked;
   const recommended = document.getElementById('f_recommended').checked;
-  const latest = document.getElementById('f_latest').checked;
   const footballNow = document.getElementById('f_footballNow').checked;
   const focusKeyword = document.getElementById('f_keyword').value.trim();
   const tags = document.getElementById('f_tags').value
@@ -3446,14 +3459,17 @@ document.getElementById('publishBtn').addEventListener('click', ()=>{
     .map(t=>t.trim())
     .filter(Boolean);
 
-  if(!title || !bodyHtml || !meta){ return; }
-
-  const postData = {
-    category, trending, recommended, latest, footballNow, author,
-    title, subtitle, snippet, image, imageAlt: alt, metaDescription: meta, focusKeyword, tags,
+  return {
+    title, category, trending, recommended, footballNow, author,
+    subtitle, snippet, image, imageAlt: alt, metaDescription: meta, focusKeyword, tags,
     body: bodyHtml
   };
+}
 
+// Saves postData as either a brand-new post or an update to
+// editingPostId, filling in the create-only fields (date/likes/etc.)
+// the first time a post is ever saved.
+function commitWriterSave(postData){
   if(editingPostId){
     updatePost(editingPostId, postData);
   } else {
@@ -3465,9 +3481,29 @@ document.getElementById('publishBtn').addEventListener('click', ()=>{
     postData.commentCount = 0;
     addPost(postData);
   }
+}
 
+document.getElementById('publishBtn').addEventListener('click', ()=>{
+  const fields = gatherWriterFields();
+  if(!fields.title || !fields.body || !fields.metaDescription){ return; }
+
+  commitWriterSave({ ...fields, status: 'published' });
   resetWriterForm();
   showFeed();
+});
+
+// Saves the post as a DRAFT — held in the dashboard only, never shown on
+// the site or in the app, so half-finished articles (no image sourced
+// yet, no meta description written) can be saved without going live.
+// Reopen it later from the dashboard's Edit button to keep working on it,
+// or hit Publish (here or after reopening it) to make it live.
+document.getElementById('draftBtn').addEventListener('click', ()=>{
+  const fields = gatherWriterFields();
+  if(!fields.title){ alert('Give the draft a title before saving it.'); return; }
+
+  commitWriterSave({ ...fields, status: 'draft' });
+  resetWriterForm();
+  showDashboard();
 });
 
 </script>
@@ -3483,8 +3519,8 @@ function renderDashboard(){
     <div class="dash-row">
       <img class="dash-thumb" src="${p.image}" alt="">
       <div class="dash-info">
-        <div class="dash-title">${escapeHtml(p.title)}</div>
-        <div class="dash-meta">${CATEGORY_LABELS[p.category]||p.category} · ${fmtDate(p.date)}${p.trending ? ' · Trending' : ''}${p.recommended ? ' · Recommended' : ''}${p.latest ? ' · Latest' : ''}</div>
+        <div class="dash-title">${p.status === 'draft' ? '<span style="color:var(--floodlight);font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;margin-right:6px;">Draft</span>' : ''}${escapeHtml(p.title)}</div>
+        <div class="dash-meta">${CATEGORY_LABELS[p.category]||p.category} · ${fmtDate(p.date)}${p.trending ? ' · Trending' : ''}${p.recommended ? ' · Recommended' : ''}${p.footballNow ? ' · Football Now' : ''}${p.status === 'draft' ? ' · Not published' : ''}</div>
       </div>
       <div class="dash-actions">
         <button class="edit-btn" data-id="${p.id}">Edit</button>
