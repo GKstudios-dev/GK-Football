@@ -44,7 +44,7 @@
   --card-h-pill-border:var(--line);
   --card-h-pill-text:var(--chalk-dim);
   --card-h-readbadge:var(--floodlight);
-  --card-h-latest-bg:var(--pitch-dark);  /* "Latest" strip cards — match the page background */
+  --card-h-latest-bg:var(--pitch-dark);  /* "Latest Stories" strip cards — match the page background */
   --good:#3F9D63;
   --warn:#E0A012;
   --bad:#D8452D;
@@ -465,8 +465,9 @@ main{max-width:760px;margin:0 auto;padding:26px 18px 60px;}
   transition:transform .18s, box-shadow .18s;
 }
 .card-h:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(0,0,0,.3);}
-/* "Latest" strip cards — no snippet/footer, just image + title — sit
-   flush against the dark green page instead of the gray snippet-card tone. */
+/* "Latest Stories" strip cards — no snippet/footer, just image + title
+   — sit flush against the dark green page instead of the gray
+   snippet-card tone. */
 .card-h-latest{background:var(--card-h-latest-bg);}
 .card-h-flow{overflow:hidden;} /* contains the float so the card doesn't collapse around it */
 .card-h-img{
@@ -1234,7 +1235,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
           <div class="view-tabs">
             <button class="view-tab active" id="tabHome">Home</button>
             <button class="view-tab" id="tabTrendingOnly">Trending</button>
-            <button class="view-tab" id="tabFootballNow">Latest</button>
+            <button class="view-tab" id="tabFootballNow">Latest Stories</button>
           </div>
 
           <!-- Category chips — same destinations as the sidebar links, just a faster path.
@@ -1373,7 +1374,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{
 
     <div class="field">
       <label style="display:inline-flex;align-items:center;gap:8px;font-family:var(--body);text-transform:none;letter-spacing:0;color:var(--chalk);">
-        <input type="checkbox" id="f_footballNow" style="width:auto;"> Show in "Latest" (breaking news, any category — the two-card preview on the Home tab and the full "Latest" tab)
+        <input type="checkbox" id="f_footballNow" style="width:auto;"> Show in "Latest Stories" (breaking news, any category — the two-card preview on the Home tab and the full "Latest Stories" tab)
       </label>
     </div>
 
@@ -2280,7 +2281,7 @@ function applyUnderlineState(){
 }
 
 // Same idea as cardsWithAds, but for flat lists of big-box cards
-// (Trending / Latest tabs): puts an explicit divider between
+// (Trending / Latest Stories tabs): puts an explicit divider between
 // EVERY card, not just relying on the .big-box + .big-box CSS
 // adjacent-sibling rule, which silently breaks the moment an ad slot
 // gets inserted between two cards and stops them being direct
@@ -2416,8 +2417,8 @@ function pickRecommended(limit=12, perCategory=4){
   return picked.slice(0, limit);
 }
 
-// "Latest" strip card — same floated-image layout as cardHtml, but image
-// + title only, no snippet, no like/comment row.
+// "Latest Stories" strip card — same floated-image layout as cardHtml,
+// but image + title only, no snippet, no like/comment row.
 function latestCardHtml(p){
   return `
     <a class="card-h card-h-latest" href="#" data-id="${p.id}">
@@ -2597,8 +2598,8 @@ function publishedPosts(){
 }
 
 // Fills the desktop-only right rail (BBC-style "Trending Now" / "Recent
-// Stories" / "Latest" column). No-op on mobile/tablet since the rail
-// is hidden there anyway, but it's cheap enough to just always keep it in sync.
+// Stories" / "Latest Stories" column). No-op on mobile/tablet since the
+// rail is hidden there anyway, but it's cheap enough to just always keep it in sync.
 function renderDesktopRail(){
   const railEl = document.getElementById('desktopRailRight');
   if(!railEl) return;
@@ -2607,7 +2608,7 @@ function renderDesktopRail(){
     .sort((a,b)=> toJSDate(b.date)-toJSDate(a.date)).slice(0,5);
   const recent = publishedPosts()
     .sort((a,b)=> toJSDate(b.date)-toJSDate(a.date)).slice(0,6);
-  const latestFlagged = publishedPosts().filter(p=>p.footballNow)
+  const latestFlagged = publishedPosts().filter(p=>p.latestStories)
     .sort((a,b)=> toJSDate(b.date)-toJSDate(a.date)).slice(0,5);
 
   const trendHtml = trending.length ? trending.map(p=>`
@@ -2637,7 +2638,7 @@ function renderDesktopRail(){
       ${recentHtml}
     </div>
     <div class="rail-block">
-      <div class="section-label">Latest</div>
+      <div class="section-label">Latest Stories</div>
       ${latestFlaggedHtml}
     </div>`;
 
@@ -2687,13 +2688,13 @@ function renderFeed(){
     let html = buildCarouselHtml(trendList);
 
     if(list.length){
-      // "Latest" strip: posts the admin flagged "Latest" come first (most
-      // recent first) — same flag that drives the full "Latest" tab, so a
-      // post marked Latest shows up both places at once. If fewer than 2
-      // are flagged, fill the rest with the most recent posts not already
-      // picked here.
+      // "Latest Stories" strip: posts the admin flagged "Latest Stories"
+      // come first (most recent first) — same flag that drives the full
+      // "Latest Stories" tab, so a post marked Latest Stories shows up
+      // both places at once. If fewer than 2 are flagged, fill the rest
+      // with the most recent posts not already picked here.
       const flaggedLatest = publishedPosts()
-        .filter(p=>p.footballNow)
+        .filter(p=>p.latestStories)
         .sort((a,b)=> toJSDate(b.date) - toJSDate(a.date));
       let latestPicks = flaggedLatest.slice(0, 2);
       if(latestPicks.length < 2){
@@ -2722,7 +2723,7 @@ function renderFeed(){
 
       if(latestA || latestB){
         html += `<div class="section-divider-h"></div>`;
-        html += `<div class="section-label">Latest</div>`;
+        html += `<div class="section-label">Latest Stories</div>`;
         if(latestA) html += latestCardHtml(latestA);
         if(latestB) html += latestCardHtml(latestB);
       }
@@ -2788,11 +2789,22 @@ function renderFeed(){
   }
 
   if(state.sort === 'footballNow'){
-    // "Latest" tab — any post the admin flagged "Latest", regardless of its
-    // category (club/national/transfers). Same big-card treatment as
-    // Trending, newest first, since this is meant to read as "what's
-    // happening right now" rather than a themed section.
-    list = list.filter(p=>p.footballNow);
+    // "Latest Stories" tab — any post the admin flagged "Latest
+    // Stories", regardless of its category (club/national/transfers).
+    // Same big-card treatment as Trending, newest first, since this is
+    // meant to read as "what's happening right now" rather than a
+    // themed section.
+    //
+    // FIELD RENAME: this now reads the `latestStories` field, not the
+    // old `footballNow` field — matches the app's own field rename (see
+    // ArticleService.getLatestStoriesArticles() on the app side). Only
+    // the actual post-data field changed; `state.sort`'s own internal
+    // value ('footballNow') is just this file's own routing key, not
+    // Firestore data, so it was left as-is on purpose. Any post flagged
+    // before this shipped still only has the OLD `footballNow: true`
+    // field — it needs its checkbox re-checked and re-saved here in the
+    // dashboard before it'll show up under this filter again.
+    list = list.filter(p=>p.latestStories);
     list.sort((a,b)=> toJSDate(b.date)-toJSDate(a.date));
 
     if(list.length === 0){
@@ -3313,7 +3325,7 @@ function loadPostIntoWriter(post){
   document.getElementById('f_category').value = post.category || 'club';
   document.getElementById('f_trending').checked = !!post.trending;
   document.getElementById('f_recommended').checked = !!post.recommended;
-  document.getElementById('f_footballNow').checked = !!post.footballNow;
+  document.getElementById('f_footballNow').checked = !!post.latestStories;
   currentImageDataUrl = post.image || null;
   const preview = document.getElementById('f_image_preview');
   const urlField = document.getElementById('f_image_url');
@@ -3452,7 +3464,14 @@ function gatherWriterFields(){
   const author = document.getElementById('f_author').value.trim() || 'The Football Post Staff';
   const trending = document.getElementById('f_trending').checked;
   const recommended = document.getElementById('f_recommended').checked;
-  const footballNow = document.getElementById('f_footballNow').checked;
+  // Variable renamed from `footballNow` to `latestStories` — via the
+  // object-literal shorthand below, this is also what determines the
+  // actual Firestore FIELD name this gets saved under. Matches the
+  // app's own field rename (see ArticleService.getLatestStoriesArticles());
+  // this is the one line that actually needed to change for the two to
+  // reconnect. Checkbox id (`f_footballNow`) is untouched — it's just
+  // this file's own internal DOM id, not data.
+  const latestStories = document.getElementById('f_footballNow').checked;
   const focusKeyword = document.getElementById('f_keyword').value.trim();
   const tags = document.getElementById('f_tags').value
     .split(',')
@@ -3460,7 +3479,7 @@ function gatherWriterFields(){
     .filter(Boolean);
 
   return {
-    title, category, trending, recommended, footballNow, author,
+    title, category, trending, recommended, latestStories, author,
     subtitle, snippet, image, imageAlt: alt, metaDescription: meta, focusKeyword, tags,
     body: bodyHtml
   };
@@ -3520,7 +3539,7 @@ function renderDashboard(){
       <img class="dash-thumb" src="${p.image}" alt="">
       <div class="dash-info">
         <div class="dash-title">${p.status === 'draft' ? '<span style="color:var(--floodlight);font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;margin-right:6px;">Draft</span>' : ''}${escapeHtml(p.title)}</div>
-        <div class="dash-meta">${CATEGORY_LABELS[p.category]||p.category} · ${fmtDate(p.date)}${p.trending ? ' · Trending' : ''}${p.recommended ? ' · Recommended' : ''}${p.footballNow ? ' · Latest' : ''}${p.status === 'draft' ? ' · Not published' : ''}</div>
+        <div class="dash-meta">${CATEGORY_LABELS[p.category]||p.category} · ${fmtDate(p.date)}${p.trending ? ' · Trending' : ''}${p.recommended ? ' · Recommended' : ''}${p.latestStories ? ' · Latest Stories' : ''}${p.status === 'draft' ? ' · Not published' : ''}</div>
       </div>
       <div class="dash-actions">
         <button class="edit-btn" data-id="${p.id}">Edit</button>
