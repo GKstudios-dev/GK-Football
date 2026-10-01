@@ -1,0 +1,26 @@
+name: Sync API data
+on:
+  schedule:
+    - cron: "0 * * * *"
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: frequent or daily
+        default: frequent
+concurrency:
+  group: sync
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+      - run: node scripts/sync.js
+        env:
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '30 3 * * *' && 'daily' || 'frequent') }}
+          API_KEY: ${{ secrets.API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
