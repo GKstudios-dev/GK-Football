@@ -1,0 +1,20 @@
+name: Articles
+on:
+  schedule:
+    - cron: "15 */2 * * *"
+  workflow_dispatch:
+concurrency:
+  group: articles
+jobs:
+  articles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+      - run: node scripts/articles.js
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
