@@ -125,17 +125,26 @@ const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "me
 
 // ---------- Prompts ----------
 function notesPrompt(idea) {
+  const keywordOnly = !idea.topic && idea.keyword;
+  const material = keywordOnly
+    ? `The editor gave only a keyword: "${idea.keyword}". Write a general, evergreen article about it.`
+    : `EDITOR'S NOTES:\n${idea.topic}`;
+  const factRule = keywordOnly
+    ? `- Stick to well-established, widely known facts. Do NOT include current-season statistics, recent results, transfers, injuries or dates, and no numbers you are not certain of. Never invent quotes.`
+    : `- Use ONLY the facts, names, scores and dates found in the notes. Never invent statistics, quotes, transfers, injuries or results. If the notes are only a general topic, write general evergreen analysis with no specific claims.`;
+  const keywordRule = idea.keyword
+    ? `\n- The focus keyword must be exactly: ${idea.keyword}`
+    : "";
   return `You are a football journalist writing for a football news app.
-Write one article from the editor's notes below.
+Write one article from the material below.
 
-EDITOR'S NOTES:
-${idea.topic}
+${material}
 
 CATEGORY: ${idea.category}
 
 RULES:
 - 600 to 800 words.
-- Use ONLY the facts, names, scores and dates found in the notes. Never invent statistics, quotes, transfers, injuries or results. If the notes are only a general topic, write general evergreen analysis with no specific claims.
+${factRule}${keywordRule}
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
@@ -616,13 +625,14 @@ async function makeNoteDrafts() {
   for (const doc of snap.docs) {
     const idea = doc.data();
     try {
-      if (!idea.topic || !idea.category) {
-        throw new Error("a note needs both a topic and a category");
+      if (!idea.topic && !idea.keyword) {
+        throw new Error("a note needs a keyword or a topic");
       }
-      const { text } = await gemini(notesPrompt(idea));
+      const note = { ...idea, category: idea.category || CATEGORIES[0] };
+      const { text } = await gemini(notesPrompt(note));
       const a = parseJson(text);
       const ref = await saveDraft(a, {
-        category: idea.category,
+        category: note.category,
         author: idea.author,
         image: idea.image,
         imageAlt: idea.imageAlt,
