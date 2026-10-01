@@ -45,6 +45,7 @@ async function gemini(prompt, { search = false } = {}) {
   if (search) body.tools = [{ google_search: {} }];
   else body.generationConfig = { responseMimeType: "application/json" };
 
+  let lastError = "";
   for (let i = 0; i < 3; i++) {
     const res = await fetch(url, {
       method: "POST",
@@ -55,6 +56,7 @@ async function gemini(prompt, { search = false } = {}) {
       body: JSON.stringify(body),
     });
     if (res.status === 429 || res.status >= 500) {
+      lastError = `${res.status}: ${(await res.text()).slice(0, 400)}`;
       await sleep(20000 * (i + 1));
       continue;
     }
@@ -72,7 +74,7 @@ async function gemini(prompt, { search = false } = {}) {
       .slice(0, 8);
     return { text, sources };
   }
-  throw new Error("Gemini is busy or the free limit is used up");
+  throw new Error(`Gemini is busy or the limit is used up. Last reply: ${lastError}`);
 }
 
 function parseJson(text) {
