@@ -1,4 +1,5 @@
 import admin from "firebase-admin";
+import { notifyTeams, wasSent, markSent } from "./notify.js";
 
 admin.initializeApp({
   credential: admin.credential.cert(
@@ -86,6 +87,24 @@ if (MODE === "frequent") {
       const h = f.teams.home.id, a = f.teams.away.id;
       teams.add(h); teams.add(a);
       pairs.add([h, a].sort((x, y) => x - y).join("-"));
+
+      // Lineup notification: once, when lineups are published and the
+      // match is due to kick off within the next 90 minutes.
+      const minsToKick = (f.fixture.timestamp * 1000 - Date.now()) / 60000;
+      if (minsToKick > 0 && minsToKick <= 90 && !(await wasSent(`lineup:${id}`))) {
+        await safe(`lineups ${id}`, async () => {
+          const l = await afList(`fixtures/lineups?fixture=${id}`);
+          if (l.length >= 2) {
+            await notifyTeams(
+              [h, a],
+              "Lineups are in",
+              `${f.teams.home.name} vs ${f.teams.away.name}`,
+              { type: "lineup", fixtureId: id }
+            );
+            await markSent(`lineup:${id}`);
+          }
+        });
+      }
     }
     if (done && (await isFinal(`fixture_${id}`))) continue;
     await safe(`fixture ${id}`, async () =>
