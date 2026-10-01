@@ -1,11 +1,14 @@
 import admin from "firebase-admin";
+import { notifyTeams, wasSent, markSent } from "./notify.js";
 
-// Live momentum recorder.
+// Live momentum recorder + live push notifications.
 // Runs as a loop: every INTERVAL it looks at the matches being played
-// right now (in your leagues), reads each one's running statistics, and
-// appends one snapshot to Firestore at momentum/{fixtureId}. The app
-// subtracts one snapshot from the next to draw the Match Momentum bars.
-// Nothing here touches the cache/* documents the other sync job writes.
+// right now (in your leagues), sends kick-off / goal notifications to
+// followers of the teams, then reads each match's running statistics
+// and appends one snapshot to Firestore at momentum/{fixtureId}. The
+// app subtracts one snapshot from the next to draw the Match Momentum
+// bars. Nothing here touches the cache/* documents the other sync job
+// writes.
 
 admin.initializeApp({
   credential: admin.credential.cert(
@@ -22,6 +25,10 @@ const MAX_RUN_MS = (Number(process.env.LIVE_MAX_MINUTES) || 330) * 60 * 1000;
 // Stop after this many checks in a row with no live match; the next
 // scheduled run starts the loop again.
 const IDLE_EXIT_TICKS = Number(process.env.LIVE_IDLE_TICKS) || 1;
+
+// A kick-off or goal older than this (minutes) is marked as handled
+// but not announced, so a late-starting job never sends stale alerts.
+const STALE_MINUTES = 10;
 
 const AF = "https://v3.football.api-sports.io";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -58,6 +65,55 @@ function num(v) {
   if (v === null || v === undefined) return 0;
   const n = parseFloat(String(v).replace("%", ""));
   return Number.isFinite(n) ? n : 0;
+}
+
+// ---------- Push notifications ----------
+// Uses only data already in the fixtures?live=all response (status,
+// score, events), so it adds no extra API calls.
+async function notifyForFixture(f) {
+  const id = f.fixture.id;
+  const { home, away } = f.teams;
+  const teamIds = [home.id, away.id];
+  const status = f.fixture.status ?? {};
+  const now = status.elapsed ?? 0;
+  const score = `${home.name} ${f.goals?.home ?? 0}-${f.goals?.away ?? 0} ${away.name}`;
+
+  // Kick-off: first time we see the match in its first half.
+  const kickKey = `kickoff:${id}`;
+  if (!(await wasSent(kickKey))) {
+    if (status.short === "1H" && now <= STALE_MINUTES + 5) {
+      await notifyTeams(
+        teamIds,
+        "Kick-off!",
+        `${home.name} vs ${away.name} is under way`,
+        { type: "kickoff", fixtureId: id }
+      );
+    }
+    await markSent(kickKey);
+  }
+
+  // Goals (the assist is in the same event, so one push covers both).
+  for (const e of f.events ?? []) {
+    if (e.type !== "Goal" || e.detail === "Missed Penalty") continue;
+    const min = e.time?.elapsed ?? 0;
+    const key =
+      `goal:${id}:${min}:${e.time?.extra ?? 0}:` +
+      `${e.player?.id ?? e.player?.name}:${e.detail}`;
+    if (await wasSent(key)) continue;
+
+    if (now - min <= STALE_MINUTES) {
+      const tag =
+        e.detail === "Own Goal" ? " (og)" : e.detail === "Penalty" ? " (pen)" : "";
+      const assist = e.assist?.name ? `, assist: ${e.assist.name}` : "";
+      await notifyTeams(
+        teamIds,
+        `⚽ GOAL! ${e.team?.name ?? ""}`.trim(),
+        `${score}\n${e.player?.name ?? "Goal"} ${min}'${tag}${assist}`,
+        { type: "goal", fixtureId: id }
+      );
+    }
+    await markSent(key);
+  }
 }
 
 // One reading of the match's running totals, or null if the API has
@@ -107,6 +163,14 @@ async function tick() {
 
   for (const f of live) {
     const id = f.fixture.id;
+
+    // Notifications first, and independent of the momentum snapshot.
+    try {
+      await notifyForFixture(f);
+    } catch (e) {
+      console.log(`notify ${id} failed: ${e.message}`);
+    }
+
     try {
       const snap = await snapshotFor(f);
       if (!snap) continue;
