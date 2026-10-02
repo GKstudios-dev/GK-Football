@@ -141,7 +141,8 @@ function parseJson(text) {
 
 const FORMAT_RULES = `- In your own original wording. Never copy sentences from any source and never quote people.
 - "body" is HTML using only <p>, <h2>, <strong>, <ul> and <li>. No <h1>, no images, no links.
-- Use the focus keyword naturally in the first paragraph and a few more times.
+- READABILITY: write SHORT paragraphs. Every <p> has 1 to 3 sentences and about 40 words at most, never more. Sentences average about 20 words or fewer, in plain simple words. Break each <h2> section into several short paragraphs so it is easy to read on a phone.
+- KEYWORD DENSITY: the exact focus keyword phrase must appear in the body text about once every 50 to 60 words (a density of roughly 1.5% to 2.2%, never above 2.5%), whatever the article's length. Do NOT change how long the article is to reach this; keep the length asked for above. Use it in the first paragraph, in some <h2> headings, and spread evenly through the article, written naturally. Do not count the title.
 - "snippet": the first one or two sentences as plain text, at most 200 characters.
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
 - "tags": 3 to 6 short lowercase tags.
@@ -265,7 +266,7 @@ STEP 2: Choose the focus keyword people would search for about that topic.
 STEP 3: Write a general, evergreen article about it.
 ${avoid}
 RULES:
-- 600 to 800 words.
+- 800 to 1,000 words.
 - Stick to well-established, widely known facts. Do NOT include current-season statistics, recent results, transfers, injuries or dates, and no numbers you are not certain of. Never invent quotes.
 ${FORMAT_RULES}
 
@@ -303,6 +304,9 @@ function matchPrompt(kind, f, facts) {
   const keyword = kind === "report"
     ? `${home} vs ${away} match report`
     : `${home} vs ${away} preview`;
+  const length = kind === "report"
+    ? "- 400 to 600 words. If few facts are listed (for example a goalless game with little data), write fewer words. Never pad with filler or invent details to reach the length."
+    : "- 500 to 700 words.";
   const task = kind === "report"
     ? `Write a MATCH REPORT: tell the story of the game, the goals and who scored them, the key moments and what the result means.`
     : `Write a MATCH PREVIEW: set the scene, compare the two teams' league position and form, summarise their recent meetings, mention home advantage and absentees, and say what to watch for. Do not predict a score as if it were fact; if you mention the statistical prediction, say it comes from a statistical model.`;
@@ -313,7 +317,7 @@ FACTS (this is all you know about the match):
 ${facts}
 
 RULES:
-- 500 to 700 words.
+${length}
 - Use ONLY the facts above. Never invent anything: no scores, goals, players, quotes, records, trophies, history or numbers that are not listed. If a detail is not listed, leave it out.
 - Do not state exact season totals for players after this match. Phrase them as "according to the latest top scorers table".
 - The focus keyword must be exactly: ${keyword}
@@ -531,6 +535,73 @@ async function reportFacts(f) {
   return lines.join("\n");
 }
 
+// ---------- Keyword density ----------
+// Density = how often the exact keyword phrase appears in the article body,
+// as a percentage of all words. Target 1.5% to 2.2%, never above 2.5%.
+const KD_MAX = 2.5;
+const plainText = (html) =>
+  html.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+
+function keywordStats(body, keyword) {
+  const text = plainText(body);
+  const words = text ? text.split(" ").length : 0;
+  const pattern = keyword
+    .trim()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  const count = (text.match(new RegExp(pattern, "gi")) ?? []).length;
+  return { words, count, density: words ? (count / words) * 100 : 0 };
+}
+
+function densityPrompt(a, lo, hi) {
+  return `Below is a football article body (HTML) and its focus keyword.
+Rewrite the body so the exact phrase "${a.focusKeyword}" appears between ${lo} and ${hi} times in the body text (case does not matter), spread evenly: in the first paragraph, in some <h2> headings, and through the rest. Keep it natural.
+
+RULES:
+- Keep the same facts, structure and roughly the same length. Do not add any new facts, numbers or quotes.
+- Keep the paragraphs short: 1 to 3 sentences each.
+- Keep using only <p>, <h2>, <strong>, <ul> and <li>.
+
+FOCUS KEYWORD: ${a.focusKeyword}
+
+BODY:
+${a.body}
+
+Return ONLY a JSON object: {"body": ""}`;
+}
+
+// Checks the body's keyword density and, if it is outside the target,
+// asks Gemini (up to twice) to adjust the wording. Records the result.
+async function fixDensity(a) {
+  const long = a.focusKeyword.trim().split(/\s+/).length > 3;
+  // Very long keyword phrases read badly when repeated, so allow a lower floor.
+  const min = long ? 1.0 : 1.5;
+  const aimLo = long ? 1.2 : 1.6;
+  const aimHi = long ? 1.8 : 2.2;
+
+  for (let i = 0; i < 2; i++) {
+    const st = keywordStats(a.body, a.focusKeyword);
+    if (st.density >= min && st.density <= KD_MAX) break;
+    const lo = Math.max(1, Math.ceil((st.words * aimLo) / 100));
+    const hi = Math.max(lo, Math.floor((st.words * aimHi) / 100));
+    console.log(
+      `keyword density ${st.density.toFixed(2)}% (${st.count}x in ${st.words} words), rewriting to ${lo}-${hi}x`
+    );
+    try {
+      const { text } = await gemini(densityPrompt(a, lo, hi));
+      const r = parseJson(text);
+      if (typeof r.body === "string" && r.body.length > 200) a.body = r.body;
+    } catch (e) {
+      console.log(`density rewrite failed: ${e.message}`);
+      break;
+    }
+  }
+  const fin = keywordStats(a.body, a.focusKeyword);
+  a.keywordDensity = Number(fin.density.toFixed(2));
+  console.log(`keyword density final: ${a.keywordDensity}% (${fin.count}x in ${fin.words} words)`);
+  return a;
+}
+
 // ---------- Saving a draft ----------
 async function saveDraft(a, extra) {
   for (const k of ["title", "body", "snippet", "metaDescription", "focusKeyword"]) {
@@ -538,6 +609,8 @@ async function saveDraft(a, extra) {
       throw new Error(`Gemini's result is missing "${k}"`);
     }
   }
+  a = await fixDensity(a);
+
   const category = CATEGORIES.includes(extra.category)
     ? extra.category
     : CATEGORIES[0];
@@ -571,6 +644,7 @@ async function saveDraft(a, extra) {
     image: image || DEFAULT_IMAGE,
     imageCredit,
     imageSource,
+    keywordDensity: a.keywordDensity ?? null,
     imageAlt: extra.imageAlt || a.imageAlt || "",
     // Page blocks. Defaults below; each kind of article sets its own, and
     // you can still flip any of them on the draft before approving.
@@ -611,7 +685,7 @@ async function publishApproved() {
     if (d.published === true) continue;
     try {
       const {
-        approved, published, source, sources, ideaId, fixtureId, createdAt, articleId,
+        approved, published, source, sources, ideaId, fixtureId, keywordDensity, createdAt, articleId,
         ...article
       } = d;
       const ref = await db.collection(ARTICLES).add({
