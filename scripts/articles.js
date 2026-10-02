@@ -30,8 +30,12 @@ const LOG = "article_log";
 const AUTHOR = "Sir Gabby";
 const DEFAULT_IMAGE =
   "https://gkstudios-dev.github.io/GK-Football/images/clubfootbal.webp";
-// The category values your app uses. Add the others here.
-const CATEGORIES = ["club"];
+// The category values your app uses.
+const CATEGORIES = ["club", "national", "transfers"];
+const CATEGORY_HELP =
+  `"club" (club football news and analysis), "national" (national team news), "transfers" (transfers and gossip)`;
+// Competitions that count as national-team news.
+const NATIONAL_LEAGUES = [1, 4]; // World Cup, European Championship
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const AUTO_MATCH = process.env.AUTO_MATCH !== "off";       // match reports + previews
@@ -128,9 +132,66 @@ const FORMAT_RULES = `- In your own original wording. Never copy sentences from 
 - "snippet": the first one or two sentences as plain text, at most 200 characters.
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
 - "tags": 3 to 6 short lowercase tags.
-- "imageAlt": a short description of a suitable image.`;
+- "imageAlt": a short description of a suitable image.
+- "imageSearch": the name of the single main person, club, stadium or competition the article is about (2 to 4 words), used to find a free photo.`;
 
-const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": ""}`;
+const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": ""}`;
+
+// ---------- Images (free-licensed, with credit) ----------
+// Looks on Wikimedia Commons for a photo of the article's main subject.
+// Only photos under licences that allow this use are accepted (CC BY,
+// CC BY-SA, CC0, public domain), and the photographer's credit is added.
+const WIKI_UA = "FootballPostArticleBot/1.0 (GitHub Actions article job)";
+const FREE_LICENSE = /^(cc[ -]?by|cc0|public domain|pd)/i;
+const BAD_LICENSE = /\b(nc|nd)\b|fair use|non-?commercial|no derivatives/i;
+const esc = (x) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+async function findImage(query) {
+  try {
+    const url =
+      "https://commons.wikimedia.org/w/api.php?" +
+      new URLSearchParams({
+        action: "query",
+        format: "json",
+        generator: "search",
+        gsrnamespace: "6",
+        gsrsearch: `${query} filetype:bitmap`,
+        gsrlimit: "15",
+        prop: "imageinfo",
+        iiprop: "url|size|mime|extmetadata",
+        iiurlwidth: "1200",
+      });
+    const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
+    if (!res.ok) {
+      console.log(`image search "${query}": HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const pages = Object.values(data.query?.pages ?? {}).sort(
+      (a, b) => (a.index ?? 0) - (b.index ?? 0)
+    );
+    for (const p of pages) {
+      const info = p.imageinfo?.[0];
+      if (!info || !/^image\/(jpeg|png|webp)$/.test(info.mime)) continue;
+      if (info.width < 900 || info.width < info.height) continue;
+      const meta = info.extmetadata ?? {};
+      const license = (meta.LicenseShortName?.value ?? "").trim();
+      if (!license || !FREE_LICENSE.test(license) || BAD_LICENSE.test(license)) continue;
+      const artist = decode(meta.Artist?.value ?? "") || "Unknown author";
+      const page = info.descriptionurl;
+      return {
+        url: info.thumburl || info.url,
+        page,
+        credit: `${artist}, ${license} (Wikimedia Commons)`,
+        creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
+      };
+    }
+    console.log(`image search "${query}": no suitable free photo`);
+  } catch (e) {
+    console.log(`image search "${query}" failed: ${e.message}`);
+  }
+  return null;
+}
 
 // ---------- Prompts ----------
 function notesPrompt(idea) {
@@ -167,7 +228,7 @@ function trendingPrompt(avoidTitles) {
     : "";
   return `You are a football journalist writing for a football news app. Today is ${today}.
 
-STEP 1: Use Google Search to find ONE football topic that is trending right now (a big match or result, a transfer story, a manager or injury story, a tournament). Choose one that fits one of these categories: ${CATEGORIES.join(", ")}.
+STEP 1: Use Google Search to find ONE football topic that is trending right now (a big match or result, a transfer story, a manager or injury story, a tournament). Choose one that fits one of these categories: ${CATEGORY_HELP}.
 STEP 2: Choose the focus keyword that people are most likely to be searching for about that topic.
 STEP 3: Write an original article about it.
 ${avoid}
@@ -177,7 +238,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
 }
 
 function evergreenPrompt(avoidTitles) {
@@ -186,7 +247,7 @@ function evergreenPrompt(avoidTitles) {
     : "";
   return `You are a football journalist writing for a football news app.
 
-STEP 1: Choose ONE evergreen football topic that readers search for year after year, for example: how a rule works, a tactic or formation explained, a playing position explained, a famous rivalry, a club's history, a legendary player's career, a famous tournament, or a beginner's guide. Choose one that fits one of these categories: ${CATEGORIES.join(", ")}.
+STEP 1: Choose ONE evergreen football topic that readers search for year after year, for example: how a rule works, a tactic or formation explained, a playing position explained, a famous rivalry, a club's history, a legendary player's career, a famous tournament, or a beginner's guide. Choose one that fits one of these categories: ${CATEGORY_HELP}.
 STEP 2: Choose the focus keyword people would search for about that topic.
 STEP 3: Write a general, evergreen article about it.
 ${avoid}
@@ -196,7 +257,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
 }
 
 function trendsPrompt(t) {
@@ -212,14 +273,15 @@ ${news}
 Write an original article about it.
 
 RULES:
+- First decide whether this is clearly about football (soccer) as a sport: a match, club, player, manager, transfer, competition or national team. If it is NOT (for example health, charity, other sports or general news), return ONLY {"isFootball": false} and nothing else.
 - 400 to 600 words.
 - Use ONLY the facts in the headlines above, plus well-established background you are completely sure of. Never invent scores, quotes, transfers, injuries, numbers or dates. If you are unsure of something, leave it out. Do not copy the headline wording.
 - The focus keyword must be exactly: ${t.term}
-- Choose one of these categories: ${CATEGORIES.join(", ")}
+- Choose one of these categories: ${CATEGORY_HELP}
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
 }
 
 function matchPrompt(kind, f, facts) {
@@ -466,23 +528,46 @@ async function saveDraft(a, extra) {
   const category = CATEGORIES.includes(extra.category)
     ? extra.category
     : CATEGORIES[0];
+
+  // Photo: your own image if the note gave one, otherwise a free-licensed
+  // photo of the subject with its credit, otherwise the default image.
+  let image = extra.image || null;
+  let imageCredit = "";
+  let imageSource = "";
+  let bodyHtml = a.body;
+  if (!image && typeof a.imageSearch === "string" && a.imageSearch.trim()) {
+    const found = await findImage(a.imageSearch.trim());
+    if (found) {
+      image = found.url;
+      imageCredit = found.credit;
+      imageSource = found.page;
+      bodyHtml = `<p><small>Photo: ${found.creditHtml}</small></p>` + a.body;
+    }
+  }
+
   return db.collection(DRAFTS).add({
     author: extra.author || AUTHOR,
     title: a.title.trim(),
     subtitle: typeof a.subtitle === "string" ? a.subtitle : "",
-    body: a.body,
+    body: bodyHtml,
     snippet: a.snippet.trim(),
     metaDescription: a.metaDescription.trim(),
     focusKeyword: a.focusKeyword.trim(),
     category,
     tags: Array.isArray(a.tags) ? a.tags.map(String) : [],
-    image: extra.image || DEFAULT_IMAGE,
+    image: image || DEFAULT_IMAGE,
+    imageCredit,
+    imageSource,
     imageAlt: extra.imageAlt || a.imageAlt || "",
-    // Edit these on the draft before approving if you want them on.
-    footballNow: false,
-    latest: true,
-    trending: false,
-    recommended: false,
+    // Page blocks. Defaults below; each kind of article sets its own, and
+    // you can still flip any of them on the draft before approving.
+    ...{
+      footballNow: false,
+      latest: true,
+      trending: false,
+      recommended: false,
+      ...(extra.flags ?? {}),
+    },
     // Workflow fields (not copied into posts)
     approved: false,
     published: false,
@@ -609,7 +694,8 @@ async function makeMatchDrafts() {
       const { text } = await gemini(matchPrompt(kind, f, facts));
       const a = parseJson(text);
       const ref = await saveDraft(a, {
-        category: CATEGORIES[0],
+        category: NATIONAL_LEAGUES.includes(f.league.id) ? "national" : "club",
+        flags: { footballNow: true },
         imageAlt: a.imageAlt || `${f.teams.home.name} vs ${f.teams.away.name}`,
         source: kind === "report" ? "match_report" : "match_preview",
         fixtureId: id,
@@ -644,8 +730,8 @@ const tagText = (x, name) => {
 };
 const slug = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 60);
 
-const FOOTBALL_WORDS = /\b(football|soccer|premier league|champions league|europa league|la liga|serie a|bundesliga|ligue 1|world cup|euros?|fa cup|carabao|transfer|striker|goalkeeper|midfielder|defender|referee|var|fc|afc|united|city|arsenal|chelsea|liverpool|tottenham|spurs|barcelona|real madrid|atletico|bayern|dortmund|psg|juventus|inter|milan|napoli|ajax|benfica|porto|vs)\b/i;
-const NOT_FOOTBALL = /\b(nfl|nba|mlb|nhl|super bowl|cricket|rugby|wwe|ufc|afl|quarterback|touchdown|college football|ncaa|nascar|formula 1|f1)\b/i;
+const FOOTBALL_WORDS = /\b(football|soccer|premier league|champions league|europa league|conference league|la liga|serie a|bundesliga|ligue 1|world cup|euros|euro 2028|fa cup|carabao cup|efl|transfer window|striker|goalkeeper|midfielder|arsenal|chelsea|liverpool|tottenham|spurs|manchester united|man utd|manchester city|man city|newcastle|west ham|aston villa|everton|brighton|barcelona|real madrid|atletico madrid|bayern|dortmund|psg|paris saint-germain|juventus|inter milan|ac milan|napoli|ajax|benfica|porto|celtic|rangers|super eagles|black stars|three lions|afcon)\b/i;
+const NOT_FOOTBALL = /\b(nfl|nba|mlb|nhl|super bowl|cricket|rugby|wwe|ufc|afl|quarterback|touchdown|college football|ncaa|nascar|formula 1|f1|cancer|awareness|treatment|therapy|wellness|disease|diet|nutrition|fitness|workout|weight loss|charity|foundation)\b/i;
 
 // Reads Google's free "trending searches" feed and keeps the football ones.
 async function fetchTrends() {
@@ -715,6 +801,7 @@ async function makeTrendingDrafts() {
         const ref = await saveDraft(a, {
           category: a.category,
           source: "trending",
+          flags: { footballNow: true, trending: true },
           sources,
         });
         avoid.push(a.title);
@@ -742,9 +829,18 @@ async function makeTrendingDrafts() {
     try {
       const { text } = await gemini(trendsPrompt(t));
       const a = parseJson(text);
+      if (a.isFootball === false) {
+        console.log(`trending "${t.term}": not football, skipped`);
+        await db.doc(`${LOG}/${key}`).set({
+          skipped: true,
+          at: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        continue;
+      }
       const ref = await saveDraft(a, {
         category: a.category,
         source: "trending",
+        flags: { footballNow: true, trending: true },
         sources: t.news.map((n) => n.url).filter(Boolean).slice(0, 6),
       });
       await db.doc(`${LOG}/${key}`).set({
@@ -778,7 +874,11 @@ async function makeEvergreenDrafts() {
     try {
       const { text } = await gemini(evergreenPrompt(avoid));
       const a = parseJson(text);
-      const ref = await saveDraft(a, { category: a.category, source: "evergreen" });
+      const ref = await saveDraft(a, {
+        category: a.category,
+        source: "evergreen",
+        flags: { recommended: true },
+      });
       avoid.push(a.title);
       console.log(`evergreen draft: "${a.title}" (${DRAFTS}/${ref.id})`);
     } catch (e) {
@@ -807,6 +907,11 @@ async function makeNoteDrafts() {
       const ref = await saveDraft(a, {
         category: note.category,
         author: idea.author,
+        flags: Object.fromEntries(
+          ["footballNow", "latest", "trending", "recommended"]
+            .filter((k) => typeof idea[k] === "boolean")
+            .map((k) => [k, idea[k]])
+        ),
         image: idea.image,
         imageAlt: idea.imageAlt,
         source: "note",
