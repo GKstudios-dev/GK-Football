@@ -7,9 +7,12 @@ import admin from "firebase-admin";
 //      match PREVIEWS for games kicking off soon. The facts come from the
 //      data your sync job already saved in Firestore (cache/*), and Gemini
 //      only writes the words. No Google Search needed.
-//   3) TRENDING (needs Google billing, OFF by default): Gemini searches Google
-//      for a trending football topic. Turn on with AUTO_TRENDING=on.
-//   4) NOTES (optional): notes you add to `article_ideas` with status "new".
+//   3) TRENDING: a football topic that is trending right now. Free mode reads
+//      Google Trends plus its news headlines; "search" mode (needs Google
+//      billing) lets Gemini search Google. Set TRENDING=off/trends/search.
+//   4) EVERGREEN: Gemini picks a timeless football topic (rules, tactics,
+//      rivalries, history, legends) and writes a general article.
+//   5) NOTES: your own keywords/notes in `article_ideas` with status "new".
 // Nothing reaches the app until you approve a draft.
 
 admin.initializeApp({
@@ -32,12 +35,18 @@ const CATEGORIES = ["club"];
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const AUTO_MATCH = process.env.AUTO_MATCH !== "off";       // match reports + previews
-const AUTO_TRENDING = process.env.AUTO_TRENDING === "on";  // needs billing on Google
+// TRENDING: "trends" (free, default) = Google Trends + its headlines,
+// "search" = Gemini searches Google (needs billing), "off" = none.
+const TRENDING = process.env.TRENDING || "trends";
+const EVERGREEN = process.env.EVERGREEN !== "off";         // timeless explainers
+const TRENDS_GEOS = ["GB", "US", "GH", "NG"];              // countries to read trends from
 
 const MATCH_PER_RUN = 2;        // match drafts per run
 const MATCH_PER_DAY = 6;        // match drafts per 24 hours
 const TRENDING_PER_RUN = 1;
 const TRENDING_PER_DAY = 3;
+const EVERGREEN_PER_RUN = 1;
+const EVERGREEN_PER_DAY = 2;
 const MAX_PENDING = 8;          // stop making drafts while this many wait for review
 const MAX_NOTES_PER_RUN = 3;
 
@@ -165,6 +174,48 @@ ${avoid}
 RULES:
 - 600 to 800 words.
 - Use only facts you found in the search results. Never invent statistics, scores, quotes, transfers or injuries. If you are not sure of a fact, leave it out.
+${FORMAT_RULES}
+
+Return ONLY a JSON object with exactly these keys:
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "category": ""}`;
+}
+
+function evergreenPrompt(avoidTitles) {
+  const avoid = avoidTitles.length
+    ? `\nDo NOT write about these topics, they are already covered:\n${avoidTitles.map((t) => `- ${t}`).join("\n")}\n`
+    : "";
+  return `You are a football journalist writing for a football news app.
+
+STEP 1: Choose ONE evergreen football topic that readers search for year after year, for example: how a rule works, a tactic or formation explained, a playing position explained, a famous rivalry, a club's history, a legendary player's career, a famous tournament, or a beginner's guide. Choose one that fits one of these categories: ${CATEGORIES.join(", ")}.
+STEP 2: Choose the focus keyword people would search for about that topic.
+STEP 3: Write a general, evergreen article about it.
+${avoid}
+RULES:
+- 600 to 800 words.
+- Stick to well-established, widely known facts. Do NOT include current-season statistics, recent results, transfers, injuries or dates, and no numbers you are not certain of. Never invent quotes.
+${FORMAT_RULES}
+
+Return ONLY a JSON object with exactly these keys:
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "category": ""}`;
+}
+
+function trendsPrompt(t) {
+  const news = t.news
+    .slice(0, 5)
+    .map((n) => `- ${n.title}${n.snippet ? ` | ${n.snippet}` : ""}`)
+    .join("\n");
+  return `You are a football journalist writing for a football news app.
+A search term is trending right now: "${t.term}".
+These news headlines are linked to it (this is all you know about the story):
+${news}
+
+Write an original article about it.
+
+RULES:
+- 400 to 600 words.
+- Use ONLY the facts in the headlines above, plus well-established background you are completely sure of. Never invent scores, quotes, transfers, injuries, numbers or dates. If you are unsure of something, leave it out. Do not copy the headline wording.
+- The focus keyword must be exactly: ${t.term}
+- Choose one of these categories: ${CATEGORIES.join(", ")}
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
@@ -576,9 +627,73 @@ async function makeMatchDrafts() {
   }
 }
 
-// ---------- 3) Trending drafts (needs billing) ----------
+// ---------- 3) Trending drafts ----------
+const decode = (x) =>
+  x
+    .replace(/<!\[CDATA\[|\]\]>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+const tagText = (x, name) => {
+  const m = x.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`));
+  return m ? decode(m[1]) : "";
+};
+const slug = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 60);
+
+const FOOTBALL_WORDS = /\b(football|soccer|premier league|champions league|europa league|la liga|serie a|bundesliga|ligue 1|world cup|euros?|fa cup|carabao|transfer|striker|goalkeeper|midfielder|defender|referee|var|fc|afc|united|city|arsenal|chelsea|liverpool|tottenham|spurs|barcelona|real madrid|atletico|bayern|dortmund|psg|juventus|inter|milan|napoli|ajax|benfica|porto|vs)\b/i;
+const NOT_FOOTBALL = /\b(nfl|nba|mlb|nhl|super bowl|cricket|rugby|wwe|ufc|afl|quarterback|touchdown|college football|ncaa|nascar|formula 1|f1)\b/i;
+
+// Reads Google's free "trending searches" feed and keeps the football ones.
+async function fetchTrends() {
+  const found = [];
+  for (const geo of TRENDS_GEOS) {
+    try {
+      const res = await fetch(`https://trends.google.com/trending/rss?geo=${geo}`, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      if (!res.ok) {
+        console.log(`trends ${geo}: HTTP ${res.status}`);
+        continue;
+      }
+      const xml = await res.text();
+      for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+        const block = m[1];
+        const term = tagText(block, "title");
+        const news = [...block.matchAll(/<ht:news_item>([\s\S]*?)<\/ht:news_item>/g)]
+          .map((n) => ({
+            title: tagText(n[1], "ht:news_item_title"),
+            snippet: tagText(n[1], "ht:news_item_snippet"),
+            url: tagText(n[1], "ht:news_item_url"),
+          }))
+          .filter((n) => n.title);
+        const text = `${term} ${news.map((n) => `${n.title} ${n.snippet}`).join(" ")}`;
+        if (!term || NOT_FOOTBALL.test(text) || !FOOTBALL_WORDS.test(text)) continue;
+        if (!found.some((x) => x.term.toLowerCase() === term.toLowerCase())) {
+          found.push({ term, news, geo });
+        }
+      }
+    } catch (e) {
+      console.log(`trends ${geo} failed: ${e.message}`);
+    }
+  }
+  return found;
+}
+
+async function recentTitles() {
+  const recent = await db
+    .collection(DRAFTS)
+    .orderBy("createdAt", "desc")
+    .limit(20)
+    .get();
+  return recent.docs.map((d) => d.data().title).filter(Boolean);
+}
+
 async function makeTrendingDrafts() {
-  if (!AUTO_TRENDING) return;
+  if (TRENDING === "off") return;
   const { madeToday, pending } = await draftCounts(["trending"]);
   if (pending >= MAX_PENDING) {
     console.log(`trending: ${pending} drafts are waiting for review, skipping`);
@@ -590,31 +705,89 @@ async function makeTrendingDrafts() {
     return;
   }
 
-  const recent = await db
-    .collection(DRAFTS)
-    .orderBy("createdAt", "desc")
-    .limit(15)
-    .get();
-  const avoid = recent.docs.map((d) => d.data().title).filter(Boolean);
+  // Paid mode: Gemini searches Google itself (needs billing on Google).
+  if (TRENDING === "search") {
+    const avoid = await recentTitles();
+    for (let i = 0; i < howMany; i++) {
+      try {
+        const { text, sources } = await gemini(trendingPrompt(avoid), { search: true });
+        const a = parseJson(text);
+        const ref = await saveDraft(a, {
+          category: a.category,
+          source: "trending",
+          sources,
+        });
+        avoid.push(a.title);
+        console.log(`trending draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+      } catch (e) {
+        console.log(`trending draft failed: ${e.message}`);
+      }
+    }
+    return;
+  }
 
-  for (let i = 0; i < howMany; i++) {
+  // Free mode: Google Trends list + its headlines, no Gemini search.
+  const trends = await fetchTrends();
+  console.log(`trending: ${trends.length} football topics found in Google Trends`);
+  let made = 0;
+  let failures = 0;
+  for (const t of trends) {
+    if (made >= howMany || failures >= 2) break;
+    const key = `trend_${slug(t.term)}`;
+    const seen = await db.doc(`${LOG}/${key}`).get();
+    if (seen.exists) {
+      const at = seen.data().at?.toMillis?.() ?? 0;
+      if (Date.now() - at < 5 * 86400000) continue; // covered in the last 5 days
+    }
     try {
-      const { text, sources } = await gemini(trendingPrompt(avoid), { search: true });
+      const { text } = await gemini(trendsPrompt(t));
       const a = parseJson(text);
       const ref = await saveDraft(a, {
         category: a.category,
         source: "trending",
-        sources,
+        sources: t.news.map((n) => n.url).filter(Boolean).slice(0, 6),
       });
-      avoid.push(a.title);
+      await db.doc(`${LOG}/${key}`).set({
+        draftId: ref.id,
+        at: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      made++;
       console.log(`trending draft: "${a.title}" (${DRAFTS}/${ref.id})`);
     } catch (e) {
-      console.log(`trending draft failed: ${e.message}`);
+      failures++;
+      console.log(`trending "${t.term}" failed: ${e.message}`);
     }
   }
 }
 
-// ---------- 4) Drafts from your own notes (optional) ----------
+// ---------- 3b) Evergreen drafts ----------
+async function makeEvergreenDrafts() {
+  if (!EVERGREEN) return;
+  const { madeToday, pending } = await draftCounts(["evergreen"]);
+  if (pending >= MAX_PENDING) {
+    console.log(`evergreen: ${pending} drafts are waiting for review, skipping`);
+    return;
+  }
+  const howMany = Math.min(EVERGREEN_PER_RUN, EVERGREEN_PER_DAY - madeToday);
+  if (howMany <= 0) {
+    console.log("evergreen: daily limit reached");
+    return;
+  }
+  const avoid = await recentTitles();
+  for (let i = 0; i < howMany; i++) {
+    try {
+      const { text } = await gemini(evergreenPrompt(avoid));
+      const a = parseJson(text);
+      const ref = await saveDraft(a, { category: a.category, source: "evergreen" });
+      avoid.push(a.title);
+      console.log(`evergreen draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+    } catch (e) {
+      console.log(`evergreen draft failed: ${e.message}`);
+    }
+  }
+}
+
+// ---------- 4) Drafts from your own keywords and notes ----------
 async function makeNoteDrafts() {
   const snap = await db
     .collection(IDEAS)
@@ -654,6 +827,7 @@ async function makeNoteDrafts() {
 await publishApproved();
 await makeMatchDrafts();
 await makeTrendingDrafts();
+await makeEvergreenDrafts();
 await makeNoteDrafts();
 console.log("Articles job done");
 process.exit(0);
