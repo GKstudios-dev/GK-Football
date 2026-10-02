@@ -50,9 +50,9 @@ const TRENDS_GEOS = ["GB", "US", "GH", "NG"];              // countries to read 
 const MATCH_PER_RUN = 2;        // match drafts per run
 const MATCH_PER_DAY = 6;        // match drafts per 24 hours
 const TRENDING_PER_RUN = 1;
-const TRENDING_PER_DAY = 3;
+const TRENDING_PER_DAY = 5;
 const EVERGREEN_PER_RUN = 1;
-const EVERGREEN_PER_DAY = 2;
+const EVERGREEN_PER_DAY = 3;
 const MAX_PENDING = 8;          // stop making drafts while this many wait for review
 const MAX_NOTES_PER_RUN = 3;
 
@@ -214,7 +214,7 @@ function notesPrompt(idea) {
     ? `The editor gave only a keyword: "${idea.keyword}". Write a general, evergreen article about it.`
     : `EDITOR'S NOTES:\n${idea.topic}`;
   const factRule = keywordOnly
-    ? `- Stick to well-established, widely known facts. Do NOT include current-season statistics, recent results, transfers, injuries or dates, and no numbers you are not certain of. Never invent quotes.`
+    ? `- Be specific, not vague: give concrete examples with real player names, club names, managers, trophies and seasons (for example, name the key players of a great era and the famous moments they were part of). Use ONLY examples and details you are completely certain are true and well documented; if you are not sure of a name, year, score or who did what, leave that detail out instead of guessing. Do NOT include current-season statistics, recent results, transfers or injuries. Never invent quotes.`
     : `- Use ONLY the facts, names, scores and dates found in the notes. Never invent statistics, quotes, transfers, injuries or results. If the notes are only a general topic, write general evergreen analysis with no specific claims.`;
   const keywordRule = idea.keyword
     ? `\n- The focus keyword must be exactly: ${idea.keyword}`
@@ -267,11 +267,37 @@ STEP 3: Write a general, evergreen article about it.
 ${avoid}
 RULES:
 - 800 to 1,000 words.
-- Stick to well-established, widely known facts. Do NOT include current-season statistics, recent results, transfers, injuries or dates, and no numbers you are not certain of. Never invent quotes.
+- Be specific, not vague: give concrete examples with real player names, club names, managers, trophies and seasons (for example, name the key players of a great era and the famous moments they were part of). Use ONLY examples and details you are completely certain are true and well documented; if you are not sure of a name, year, score or who did what, leave that detail out instead of guessing. Do NOT include current-season statistics, recent results, transfers or injuries. Never invent quotes.
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
 {"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
+}
+
+// Reads the text of the news pages linked to a trend, so the article can
+// explain what is really happening (the headlines alone are too thin).
+async function sourceNotes(news) {
+  const out = [];
+  for (const n of news.slice(0, 3)) {
+    if (!n.url) continue;
+    try {
+      const res = await fetch(n.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; FootballPostBot/1.0)" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok || !/html/i.test(res.headers.get("content-type") ?? "")) continue;
+      const html = (await res.text()).replace(/<(script|style)[\s\S]*?<\/\1>/gi, "");
+      const paras = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
+        .map((m) => decode(m[1]))
+        .filter((x) => x.length > 60);
+      const text = paras.join(" ").slice(0, 3500);
+      if (text.length > 300) out.push(text);
+    } catch (e) {
+      // page blocked or slow: skip it, the headlines still work
+    }
+  }
+  return out;
 }
 
 function trendsPrompt(t) {
@@ -279,17 +305,23 @@ function trendsPrompt(t) {
     .slice(0, 5)
     .map((n) => `- ${n.title}${n.snippet ? ` | ${n.snippet}` : ""}`)
     .join("\n");
-  return `You are a football journalist writing for a football news app.
+  const today = new Date().toISOString().slice(0, 10);
+  const notes = (t.notes ?? []).length
+    ? `\nSOURCE NOTES (background text from news pages about the story):\n${t.notes.map((x, i) => `[${i + 1}] ${x}`).join("\n")}\n`
+    : "";
+  return `You are a football journalist writing for a football news app. Today is ${today}.
 A search term is trending right now: "${t.term}".
-These news headlines are linked to it (this is all you know about the story):
+These news headlines are linked to it:
 ${news}
-
-Write an original article about it.
+${notes}
+This is all you know about the story. Write an original, detailed article about it.
 
 RULES:
 - First decide whether this is clearly about football (soccer) as a sport: a match, club, player, manager, transfer, competition or national team. If it is NOT (for example health, charity, other sports or general news), return ONLY {"isFootball": false} and nothing else.
 - 400 to 600 words.
-- Use ONLY the facts in the headlines above, plus well-established background you are completely sure of. Never invent scores, quotes, transfers, injuries, numbers or dates. If you are unsure of something, leave it out. Do not copy the headline wording.
+- Answer who, what, when, where and why. Be specific: use the names, numbers, scores and dates found in the headlines and source notes. If they explain WHY something is happening, explain it clearly. If the date or time of the event is given, state it in the first paragraph; if it is not given, do not guess it.
+- Use ONLY the facts in the headlines and source notes, plus well-established background you are completely sure of. Never invent scores, quotes, transfers, injuries, numbers or dates. If something is not known, leave it out and write a shorter article rather than guess.
+- Rewrite everything completely in your own words. Never copy sentences from the notes and never quote people.
 - The focus keyword must be exactly: ${t.term}
 - Choose one of these categories: ${CATEGORY_HELP}
 ${FORMAT_RULES}
@@ -305,11 +337,11 @@ function matchPrompt(kind, f, facts) {
     ? `${home} vs ${away} match report`
     : `${home} vs ${away} preview`;
   const length = kind === "report"
-    ? "- 400 to 600 words. If few facts are listed (for example a goalless game with little data), write fewer words. Never pad with filler or invent details to reach the length."
+    ? "- 500 to 700 words when the facts are rich (goals, line-ups, player stats); 350 to 500 words when they are thin. Never pad with filler or invent details to reach the length."
     : "- 500 to 700 words.";
   const task = kind === "report"
-    ? `Write a MATCH REPORT: tell the story of the game, the goals and who scored them, the key moments and what the result means.`
-    : `Write a MATCH PREVIEW: set the scene, compare the two teams' league position and form, summarise their recent meetings, mention home advantage and absentees, and say what to watch for. Do not predict a score as if it were fact; if you mention the statistical prediction, say it comes from a statistical model.`;
+    ? `Write a detailed MATCH REPORT. Open with the date, the competition and the venue. Then tell the story of the game: name every goalscorer with the minute and who assisted, mention the cards, the formations and starting players (with shirt numbers where listed), the standout performers using the ratings, goals, assists, shots and key passes given, and the key numbers (possession, shots, corners). Be specific, with player names and figures, and use as many of the listed facts as read well.`
+    : `Write a MATCH PREVIEW. State the date and kick-off time in the first paragraph. Set the scene, compare the two teams' league position and form, summarise their recent meetings, mention home advantage and absentees, and say what to watch for. Do not predict a score as if it were fact; if you mention the statistical prediction, say it comes from a statistical model.`;
   return `You are a football journalist writing for a football news app.
 ${task}
 
@@ -348,6 +380,10 @@ const ord = (n) => {
   const v = n % 100;
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
 };
+const day = (ts) =>
+  new Date(ts * 1000).toLocaleDateString("en-GB", {
+    weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC",
+  });
 const when = (ts) =>
   new Date(ts * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 const rec = (r) =>
@@ -374,6 +410,7 @@ async function previewFacts(f) {
 
   lines.push(`Competition: ${lg.name}${lg.round ? ` - ${lg.round}` : ""}${lg.country ? ` (${lg.country})` : ""}`);
   lines.push(`Match: ${home.name} (home) vs ${away.name} (away)`);
+  lines.push(`Date: ${day(f.fixture.timestamp)}`);
   lines.push(`Kick-off: ${when(f.fixture.timestamp)}`);
   if (f.fixture.venue?.name) {
     lines.push(`Venue: ${f.fixture.venue.name}${f.fixture.venue.city ? `, ${f.fixture.venue.city}` : ""}`);
@@ -465,6 +502,7 @@ async function reportFacts(f) {
   const lines = [];
 
   lines.push(`Competition: ${lg.name}${lg.round ? ` - ${lg.round}` : ""}${lg.country ? ` (${lg.country})` : ""}`);
+  lines.push(`Date played: ${day(f.fixture.timestamp)} (kick-off ${when(f.fixture.timestamp)})`);
   lines.push(`Final score: ${home.name} ${f.goals.home}-${f.goals.away} ${away.name} (${home.name} at home)`);
   if (f.score?.halftime?.home != null) {
     lines.push(`Half-time: ${f.score.halftime.home}-${f.score.halftime.away}`);
@@ -497,6 +535,12 @@ async function reportFacts(f) {
     for (const e of reds) {
       lines.push(`Red card: ${e.player?.name} (${e.team?.name}) ${e.time?.elapsed}'`);
     }
+    const yellows = events.filter((e) => e.type === "Card" && e.detail === "Yellow Card");
+    if (yellows.length) {
+      lines.push(
+        `Yellow cards: ${yellows.map((e) => `${e.player?.name} (${e.team?.name}) ${e.time?.elapsed}'`).join(", ")}`
+      );
+    }
     const stat = (teamId, type) =>
       detail.statistics
         ?.find((s) => s.team?.id === teamId)
@@ -515,9 +559,44 @@ async function reportFacts(f) {
       .map((l) => (l.formation ? `${l.team?.name} ${l.formation}` : null))
       .filter(Boolean);
     if (formations.length) lines.push(`Formations: ${formations.join(", ")}`);
+    const elevens = (detail.lineups ?? [])
+      .map((l) => {
+        const names = (l.startXI ?? []).map(
+          (x) => `${x.player?.name} (#${x.player?.number}${x.player?.pos ? `, ${x.player.pos}` : ""})`
+        );
+        return names.length
+          ? `${l.team?.name} starting XI${l.coach?.name ? ` (coach ${l.coach.name})` : ""}: ${names.join(", ")}`
+          : null;
+      })
+      .filter(Boolean);
+    if (elevens.length) {
+      lines.push("Position codes: G goalkeeper, D defender, M midfielder, F forward");
+      lines.push(...elevens);
+    }
   } else if (f.goals.home + f.goals.away > 0) {
     // No event detail saved: a report with no scorers would be thin.
     return null;
+  }
+
+  // Standout performers, from the saved player statistics
+  const pdata = await readCache(`players_${id}`);
+  if (pdata) {
+    const all = [];
+    for (const t of pdata) {
+      for (const pl of t.players ?? []) {
+        const st = pl.statistics?.[0];
+        const rating = parseFloat(st?.games?.rating);
+        if (Number.isFinite(rating)) {
+          all.push({ name: pl.player?.name, team: t.team?.name, rating, st });
+        }
+      }
+    }
+    all.sort((x, y) => y.rating - x.rating);
+    const top = all.slice(0, 4).map(
+      (p) =>
+        `${p.name} (${p.team}) rating ${p.rating.toFixed(1)}, ${p.st.goals?.total ?? 0} goals, ${p.st.goals?.assists ?? 0} assists, ${p.st.shots?.total ?? 0} shots, ${p.st.passes?.key ?? 0} key passes`
+    );
+    if (top.length) lines.push(`Highest-rated players (match data ratings): ${top.join("; ")}`);
   }
 
   // Top scorers table for the goal scorers
@@ -914,6 +993,7 @@ async function makeTrendingDrafts() {
       if (Date.now() - at < 5 * 86400000) continue; // covered in the last 5 days
     }
     try {
+      t.notes = await sourceNotes(t.news);
       const { text } = await gemini(trendsPrompt(t));
       const a = parseJson(text);
       if (a.isFootball === false) {
