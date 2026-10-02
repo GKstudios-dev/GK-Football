@@ -38,6 +38,8 @@ const CATEGORY_HELP =
 const NATIONAL_LEAGUES = [1, 4]; // World Cup, European Championship
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+// Used automatically when the main model says it is overloaded.
+const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
 const AUTO_MATCH = process.env.AUTO_MATCH !== "off";       // match reports + previews
 // TRENDING: "trends" (free, default) = Google Trends + its headlines,
 // "search" = Gemini searches Google (needs billing), "off" = none.
@@ -80,9 +82,9 @@ const isoDate = (d) =>
 // ---------- Gemini ----------
 // With search on, the model can look things up on Google (needs billing).
 // The reply also lists the pages it used, which we keep on the draft.
-async function gemini(prompt, { search = false } = {}) {
+async function geminiOnce(prompt, { search = false } = {}, model = MODEL) {
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const body = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
   if (search) body.tools = [{ google_search: {} }];
   else body.generationConfig = { responseMimeType: "application/json" };
@@ -117,6 +119,17 @@ async function gemini(prompt, { search = false } = {}) {
     return { text, sources };
   }
   throw new Error(`Gemini is busy or the limit is used up. Last reply: ${lastError}`);
+}
+
+async function gemini(prompt, opts = {}) {
+  try {
+    return await geminiOnce(prompt, opts);
+  } catch (e) {
+    const busy = String(e.message).startsWith("Gemini is busy");
+    if (opts.search || !busy || FALLBACK_MODEL === MODEL) throw e;
+    console.log(`${MODEL} is busy, trying ${FALLBACK_MODEL}`);
+    return geminiOnce(prompt, opts, FALLBACK_MODEL);
+  }
 }
 
 function parseJson(text) {
