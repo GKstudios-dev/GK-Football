@@ -83,10 +83,12 @@ const isoDate = (d) =>
 // ---------- Gemini ----------
 // With search on, the model can look things up on Google (needs billing).
 // The reply also lists the pages it used, which we keep on the draft.
-async function geminiOnce(prompt, { search = false } = {}, model = MODEL) {
+async function geminiOnce(prompt, { search = false, image = null } = {}, model = MODEL) {
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const body = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+  const parts = [{ text: prompt }];
+  if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
+  const body = { contents: [{ role: "user", parts }] };
   if (search) body.tools = [{ google_search: {} }];
   else body.generationConfig = { responseMimeType: "application/json" };
 
@@ -143,8 +145,8 @@ function parseJson(text) {
 const FORMAT_RULES = `- In your own original wording. Never copy sentences from any source and never quote people.
 - "body" is HTML using only <p>, <h2>, <strong>, <ul> and <li>. No <h1>, no images, no links.
 - READABILITY: write SHORT paragraphs. Every <p> has 1 to 3 sentences and about 40 words at most, never more. Sentences average about 20 words or fewer, in plain simple words. Break each <h2> section into several short paragraphs so it is easy to read on a phone.
-- The TITLE MUST contain the exact focus keyword phrase, ideally near the start. The subtitle and the metaDescription must contain it too. This is the most important rule.
-- KEYWORD DENSITY: the exact focus keyword phrase must appear in the body text about once every 50 to 60 words (a density of roughly 1.5% to 2.2%, never above 2.5%), whatever the article's length. Do NOT change how long the article is to reach this; keep the length asked for above. Use it in the first paragraph, in some <h2> headings, and spread evenly through the article, written naturally. Do not count the title.
+- The TITLE MUST be 50 to 60 characters long counting every letter and space (never more than 60, never fewer than 40) and MUST contain the exact focus keyword phrase, ideally near the start. The subtitle and the metaDescription must contain it too. This is the most important rule.
+- KEYWORD DENSITY: the exact focus keyword phrase must appear in the body text about once every 55 to 65 words (a density of 1.5% to 1.9%) and NEVER above 2.0%, whatever the article's length. Do NOT change how long the article is to reach this; keep the length asked for above. Use it in the first paragraph, in a few <h2> headings, and spread evenly. NEVER put it in every paragraph: at most once per paragraph, and at least a third of the paragraphs must not contain it. In the other paragraphs use a pronoun or a short form instead (for example "he", "the club", "the award"). Do not count the title.
 - "snippet": the first one or two sentences as plain text, at most 200 characters.
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
 - "tags": 3 to 6 short lowercase tags.
@@ -254,6 +256,7 @@ async function commonsCandidates(term, subject) {
         page,
         year,
         score,
+        inName,
         file: p.title,
         credit: `${artist}, ${license} (Wikimedia Commons)`,
         creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
@@ -306,6 +309,7 @@ async function openversePhotos(subject) {
         url: imageUrl,
         page,
         score: (inTitle ? 3 : 0) + (inTag ? 1 : 0), // always below a good Commons photo
+        inName: inTitle,
         file: r.title,
         credit: `${creator}, ${licName} (${where})`,
         creditHtml: `<a href="${page}">${esc(creator)}</a>, ${esc(licName)} (${esc(where)})`,
@@ -317,9 +321,82 @@ async function openversePhotos(subject) {
   return out;
 }
 
+// ---------- Looking at the photo itself ----------
+// Gemini can see images. Before a photo is used, it is shown the picture and
+// asked what it really shows. That catches things a file name cannot, such
+// as football boots filed under a player's name, a logo, or a crowd. It does
+// not try to recognise anybody by their face: who is in the photo comes from
+// the photo's own labels (checked above), while Gemini checks the kind of
+// picture and writes a true description for the alt text.
+const MAX_PHOTO_CHECKS = 8;
+
+function visionPrompt(subject) {
+  return `An article about "${subject}" needs a photo. Look at the image carefully.
+
+Answer ONLY with a JSON object:
+{"description": "", "isPhotograph": true, "mainFocus": "", "suitable": true, "reason": ""}
+
+- description: one plain factual sentence (under 100 characters) saying what the image shows, for example "A footballer in a blue shirt controls the ball". Name a person only if their name is written in the image.
+- isPhotograph: false for logos, drawings, maps, screenshots and graphics.
+- mainFocus: one of "person", "group of people", "stadium", "crowd", "object", "other".
+- suitable: true ONLY if this is a good, relevant photo for an article about "${subject}". If the subject is a person (a player, manager or other individual), the main focus must be a person, ideally in a football setting, NOT boots, a ball, a trophy, a logo, a scoreboard or a crowd. If the subject is a club or national team, the image should show its players, kit, badge or stadium. If the subject is a stadium, it must show a stadium. If a name or number written in the image clearly contradicts the subject, suitable is false.
+- Do NOT try to recognise anyone by their face. If you cannot tell who someone is from writing in the image, judge only whether the type of image fits.
+- reason: a few words.`;
+}
+
+async function checkPhoto(photo, subject) {
+  try {
+    const res = await fetch(photo.url, {
+      headers: { "User-Agent": WIKI_UA },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return { error: `HTTP ${res.status}` };
+    const mime = (res.headers.get("content-type") || "image/jpeg").split(";")[0];
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 4_000_000) return { error: "image too large to check" };
+    const { text } = await gemini(visionPrompt(subject), {
+      image: { mime, data: buf.toString("base64") },
+    });
+    return parseJson(text);
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// "Edin Dzeko: A footballer in a blue shirt controls the ball" (max 125 characters)
+function composeAlt(subject, description) {
+  const d = String(description ?? "").trim().replace(/\.$/, "");
+  if (!d) return subject;
+  const alt = norm(d).includes(norm(subject)) ? d : `${subject}: ${d}`;
+  return alt.slice(0, 125);
+}
+
+// Shows each candidate photo to Gemini, best-scoring first, and keeps the
+// ones that really fit, until `count` are found.
+async function pickVerified(candidates, subject, count, state) {
+  const accepted = [];
+  for (const c of candidates) {
+    if (accepted.length >= count || state.checks >= MAX_PHOTO_CHECKS) break;
+    state.checks++;
+    const v = await checkPhoto(c, subject);
+    if (v.error) {
+      // Gemini could not look at it (busy, or the image would not load).
+      // An unchecked photo is never used: no photo is better than a wrong one.
+      console.log(`  could not check ${c.file}: ${v.error}`);
+      continue;
+    }
+    if (v.suitable === true && v.isPhotograph !== false) {
+      accepted.push({ ...c, alt: composeAlt(subject, v.description) });
+    } else {
+      console.log(`  rejected ${c.file}: ${v.mainFocus ?? "?"} (${v.reason ?? "not suitable"})`);
+    }
+  }
+  return accepted;
+}
+
 // Up to `count` DIFFERENT photos of `subject`, best first (the first one is
-// used as the featured image). Fewer, or none, is fine: a missing photo is
-// better than a photo of somebody else.
+// used as the featured image). Each one has been looked at by Gemini.
+// Fewer, or none, is fine: a missing photo is better than a wrong one.
 async function findImages(subject, { era = "any", count = 3 } = {}) {
   const thisYear = new Date().getUTCFullYear();
   // For current stories, also search with the current and previous year:
@@ -343,19 +420,26 @@ async function findImages(subject, { era = "any", count = 3 } = {}) {
     list = list.filter((c) => c.year && c.year >= thisYear - MAX_PHOTO_AGE_YEARS);
   }
   list.sort((a, b) => b.score - a.score);
-  let photos = list.slice(0, count);
+
+  const state = { checks: 0 };
+  let photos = await pickVerified(list, subject, count, state);
 
   if (era !== "current" && photos.length < count) {
-    const have = new Set(photos.map((p) => p.url));
+    const have = new Set(list.map((p) => p.url));
     const more = (await openversePhotos(subject))
       .filter((c) => !have.has(c.url))
       .sort((a, b) => b.score - a.score);
-    photos = photos.concat(more).slice(0, count);
+    photos = photos.concat(await pickVerified(more, subject, count - photos.length, state));
   }
-  photos = photos.map((p) => ({ ...p, alt: subject }));
   console.log(
     `images for "${subject}" (${era}): found ${photos.length} of ${count}` +
-      photos.map((p, i) => `\n  ${i === 0 ? "featured" : "body"}: ${p.file} (score ${p.score.toFixed(1)})`).join("")
+      photos
+        .map(
+          (p, i) =>
+            `\n  ${i === 0 ? "featured" : "body"}: ${p.file} (score ${p.score.toFixed(1)})` +
+            `\n    alt: ${p.alt}`
+        )
+        .join("")
   );
   return photos;
 }
@@ -793,8 +877,8 @@ async function reportFacts(f) {
 
 // ---------- Keyword density ----------
 // Density = how often the exact keyword phrase appears in the article body,
-// as a percentage of all words. Target 1.5% to 2.2%, never above 2.5%.
-const KD_MAX = 2.5;
+// as a percentage of all words. Target 1.5% to 1.9%, never above 2.0%.
+const KD_MAX = 2.0;
 const plainText = (html) =>
   html.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
@@ -809,11 +893,16 @@ function keywordStats(body, keyword) {
   return { words, count, density: words ? (count / words) * 100 : 0 };
 }
 
-function densityPrompt(a, lo, hi) {
+function densityPrompt(a, lo, hi, st) {
+  const direction =
+    st.count > hi
+      ? `The phrase currently appears ${st.count} times, which is TOO MANY. Remove ${st.count - hi} or more of them.`
+      : `The phrase currently appears ${st.count} times, which is too few.`;
   return `Below is a football article body (HTML) and its focus keyword.
-Rewrite the body so the exact phrase "${a.focusKeyword}" appears between ${lo} and ${hi} times in the body text (case does not matter), spread evenly: in the first paragraph, in some <h2> headings, and through the rest. Keep it natural.
+Rewrite the body so the exact phrase "${a.focusKeyword}" appears between ${lo} and ${hi} times in the body text (case does not matter). ${direction}
 
 RULES:
+- Use the phrase in the first paragraph, in a few <h2> headings, and spread evenly. At most ONCE per paragraph, and at least a third of the paragraphs must not contain it. In the other places use a pronoun or a short form (for example "he", "the club", "the award").
 - Keep the same facts, structure and roughly the same length. Do not add any new facts, numbers or quotes.
 - Keep the paragraphs short: 1 to 3 sentences each.
 - Keep using only <p>, <h2>, <strong>, <ul> and <li>.
@@ -827,15 +916,15 @@ Return ONLY a JSON object: {"body": ""}`;
 }
 
 // Checks the body's keyword density and, if it is outside the target,
-// asks Gemini (up to twice) to adjust the wording. Records the result.
+// asks Gemini (up to three times) to adjust the wording. Records the result.
 async function fixDensity(a) {
   const long = a.focusKeyword.trim().split(/\s+/).length > 3;
   // Very long keyword phrases read badly when repeated, so allow a lower floor.
   const min = long ? 1.0 : 1.5;
-  const aimLo = long ? 1.2 : 1.6;
-  const aimHi = long ? 1.8 : 2.2;
+  const aimLo = long ? 1.1 : 1.5;
+  const aimHi = long ? 1.6 : 1.9;
 
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < 3; i++) {
     const st = keywordStats(a.body, a.focusKeyword);
     if (st.density >= min && st.density <= KD_MAX) break;
     const lo = Math.max(1, Math.ceil((st.words * aimLo) / 100));
@@ -844,7 +933,7 @@ async function fixDensity(a) {
       `keyword density ${st.density.toFixed(2)}% (${st.count}x in ${st.words} words), rewriting to ${lo}-${hi}x`
     );
     try {
-      const { text } = await gemini(densityPrompt(a, lo, hi));
+      const { text } = await gemini(densityPrompt(a, lo, hi, st));
       const r = parseJson(text);
       if (typeof r.body === "string" && r.body.length > 200) a.body = r.body;
     } catch (e) {
@@ -865,7 +954,7 @@ function placementPrompt(a, kw) {
   return `Fix these parts of a football article so that EACH ONE contains the exact phrase "${kw}" (capital letters do not matter).
 
 RULES:
-- title: natural, under 65 characters, with the phrase at or near the start.
+- title: natural, between 50 and 60 characters long counting spaces (never more than 60), with the phrase at or near the start.
 - subtitle: one sentence, under 140 characters.
 - metaDescription: at most 155 characters.
 - Keep the same meaning. Do not add any new facts, numbers or names.
@@ -904,6 +993,44 @@ async function ensureKeywordPlacement(a) {
   return a;
 }
 
+// ---------- Title length: 40 to 60 characters (aim 50 to 60) ----------
+const TITLE_MIN = 40;
+const TITLE_MAX = 60;
+
+async function fitTitle(a) {
+  const kw = a.focusKeyword.trim();
+  const good = (t) =>
+    typeof t === "string" && t.length >= TITLE_MIN && t.length <= TITLE_MAX && hasPhrase(t, kw);
+
+  for (let i = 0; i < 2 && !good(a.title); i++) {
+    console.log(`title is ${a.title.length} characters, fixing: "${a.title}"`);
+    try {
+      const { text } = await gemini(
+        `Rewrite this football article title so it is between 50 and 60 characters long, counting every letter and space (never more than 60). It must contain the exact phrase "${kw}", ideally near the start. Keep the meaning. Do not add new facts.
+
+CURRENT TITLE (${a.title.length} characters): ${a.title}
+
+Return ONLY a JSON object: {"title": ""}`
+      );
+      const t = parseJson(text).title;
+      if (good(t)) a.title = t.trim();
+    } catch (e) {
+      console.log(`title fix failed: ${e.message}`);
+      break;
+    }
+  }
+
+  // Last resort for a title that is still too long: cut it at a word and
+  // keep the keyword.
+  if (a.title.length > TITLE_MAX) {
+    let cut = a.title.slice(0, TITLE_MAX + 1);
+    cut = cut.slice(0, cut.lastIndexOf(" ")).replace(/[\s:,\-–—]+$/, "");
+    a.title = hasPhrase(cut, kw) ? cut : kw;
+    console.log(`title cut to ${a.title.length} characters: "${a.title}"`);
+  }
+  return a;
+}
+
 // ---------- Saving a draft ----------
 async function saveDraft(a, extra) {
   for (const k of ["title", "body", "snippet", "metaDescription", "focusKeyword"]) {
@@ -913,6 +1040,7 @@ async function saveDraft(a, extra) {
   }
   a = await fixDensity(a);
   a = await ensureKeywordPlacement(a);
+  a = await fitTitle(a);
 
   const category = CATEGORIES.includes(extra.category)
     ? extra.category
@@ -925,6 +1053,7 @@ async function saveDraft(a, extra) {
   let image = extra.image || null;
   let imageCredit = "";
   let imageSource = "";
+  let imageAlt = extra.imageAlt || a.imageAlt || "";
   let bodyHtml = a.body;
   const subject = String(
     a.mainSubject || a.imageSearches?.[0] || a.imageSearch || ""
@@ -937,7 +1066,10 @@ async function saveDraft(a, extra) {
     image = featured.url;
     imageCredit = featured.credit;
     imageSource = featured.page;
+    imageAlt = featured.alt; // what the picture really shows
     bodyHtml = `<p><small>Photo: ${featured.creditHtml}</small></p>` + bodyHtml;
+  } else if (!image) {
+    imageAlt = "Football"; // the default image is generic
   }
   bodyHtml = addBodyImages(bodyHtml, photos.slice(0, 2));
 
@@ -964,7 +1096,7 @@ async function saveDraft(a, extra) {
     date: new Date().toISOString(),
     focusKeyword: a.focusKeyword.trim(),
     image: image || DEFAULT_IMAGE,
-    imageAlt: extra.imageAlt || a.imageAlt || "",
+    imageAlt,
     likedBy: [],
     likes: 0,
     metaDescription: a.metaDescription.trim(),
