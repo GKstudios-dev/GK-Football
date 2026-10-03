@@ -13,7 +13,8 @@ import admin from "firebase-admin";
 //   4) EVERGREEN: Gemini picks a timeless football topic (rules, tactics,
 //      rivalries, history, legends) and writes a general article.
 //   5) NOTES: your own keywords/notes in `article_ideas` with status "new".
-// Nothing reaches the app until you approve a draft.
+// Drafts are saved in `posts` with status "draft", so they appear in your
+// dashboard like drafts you wrote yourself. Publish them from the dashboard.
 
 admin.initializeApp({
   credential: admin.credential.cert(
@@ -147,20 +148,43 @@ const FORMAT_RULES = `- In your own original wording. Never copy sentences from 
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
 - "tags": 3 to 6 short lowercase tags.
 - "imageAlt": a short description of a suitable image.
-- "imageSearch": the name of the single main person, club, stadium or competition the article is about (2 to 4 words), used to find a free photo.`;
+- "mainSubject": the ONE person, club, national team or stadium the article is mostly about, as a real name that photographers would label (for example "Cristiano Ronaldo" or "Manchester City"). All the article's photos will be photos of this subject, so name it precisely.`;
 
-const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": ""}`;
+const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": ""}`;
 
 // ---------- Images (free-licensed, with credit) ----------
-// Looks on Wikimedia Commons for a photo of the article's main subject.
-// Only photos under licences that allow this use are accepted (CC BY,
-// CC BY-SA, CC0, public domain), and the photographer's credit is added.
+// Every photo in an article is a photo of the article's MAIN SUBJECT (for
+// example Cristiano Ronaldo): one featured image and up to two more inside
+// the body. A photo is only accepted if the subject's name appears in the
+// photo's own title, categories or description, so a photo of somebody else
+// is never used. Photos come from Wikimedia Commons (and, for timeless
+// articles only, Openverse). Only licences that allow this use are accepted
+// (CC BY, CC BY-SA, CC0, public domain) and every photo is credited.
+//
+// era "current": news and match articles. Only photos taken in the last two
+//   years are used (the photo's own date must be known), so an old picture is
+//   never used for a current story.
+// era "any": timeless articles. Any date is fine, newest preferred.
 const WIKI_UA = "FootballPostArticleBot/1.0 (GitHub Actions article job)";
 const FREE_LICENSE = /^(cc[ -]?by|cc0|public domain|pd)/i;
 const BAD_LICENSE = /\b(nc|nd)\b|fair use|non-?commercial|no derivatives/i;
+const MAX_PHOTO_AGE_YEARS = 2;
 const esc = (x) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const yearOf = (text) => {
+  const m = /(?:19|20)\d{2}/.exec(text ?? "");
+  return m ? Number(m[0]) : null;
+};
+const norm = (x) =>
+  String(x ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+// True when every word of the subject's name appears in the text.
+const mentions = (text, subject) => {
+  const hay = norm(text);
+  const words = norm(subject).split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+  return words.length > 0 && words.every((w) => hay.includes(w));
+};
 
-async function findImage(query) {
+// Wikimedia Commons: usable photos of `subject`, in relevance order.
+async function commonsCandidates(term, subject) {
   try {
     const url =
       "https://commons.wikimedia.org/w/api.php?" +
@@ -169,21 +193,22 @@ async function findImage(query) {
         format: "json",
         generator: "search",
         gsrnamespace: "6",
-        gsrsearch: `${query} filetype:bitmap`,
-        gsrlimit: "15",
+        gsrsearch: `${term} filetype:bitmap`,
+        gsrlimit: "40",
         prop: "imageinfo",
         iiprop: "url|size|mime|extmetadata",
         iiurlwidth: "1200",
       });
     const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
     if (!res.ok) {
-      console.log(`image search "${query}": HTTP ${res.status}`);
-      return null;
+      console.log(`image search "${term}": HTTP ${res.status}`);
+      return [];
     }
     const data = await res.json();
     const pages = Object.values(data.query?.pages ?? {}).sort(
       (a, b) => (a.index ?? 0) - (b.index ?? 0)
     );
+    const out = [];
     for (const p of pages) {
       const info = p.imageinfo?.[0];
       if (!info || !/^image\/(jpeg|png|webp)$/.test(info.mime)) continue;
@@ -191,20 +216,137 @@ async function findImage(query) {
       const meta = info.extmetadata ?? {};
       const license = (meta.LicenseShortName?.value ?? "").trim();
       if (!license || !FREE_LICENSE.test(license) || BAD_LICENSE.test(license)) continue;
+      // The photo must really be of the subject.
+      const about = [
+        p.title,
+        meta.ObjectName?.value,
+        meta.Categories?.value,
+        meta.ImageDescription?.value,
+      ].map((v) => decode(String(v ?? ""))).join(" ");
+      if (!mentions(about, subject)) continue;
       const artist = decode(meta.Artist?.value ?? "") || "Unknown author";
       const page = info.descriptionurl;
-      return {
+      out.push({
         url: info.thumburl || info.url,
         page,
+        year: yearOf(decode(meta.DateTimeOriginal?.value ?? "")),
         credit: `${artist}, ${license} (Wikimedia Commons)`,
         creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
-      };
+      });
     }
-    console.log(`image search "${query}": no suitable free photo`);
+    return out;
   } catch (e) {
-    console.log(`image search "${query}" failed: ${e.message}`);
+    console.log(`image search "${term}" failed: ${e.message}`);
+    return [];
   }
-  return null;
+}
+
+// Openverse (free-licensed photos from Flickr and others). It does not say
+// when a photo was taken, so it is only used for timeless articles.
+async function openversePhotos(subject, exclude) {
+  const out = [];
+  try {
+    const url =
+      "https://api.openverse.org/v1/images/?" +
+      new URLSearchParams({
+        q: subject,
+        license_type: "commercial",
+        category: "photograph",
+        page_size: "20",
+      });
+    const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
+    if (!res.ok) {
+      console.log(`openverse "${subject}": HTTP ${res.status}`);
+      return out;
+    }
+    const data = await res.json();
+    for (const r of data.results ?? []) {
+      const lic = String(r.license ?? "").toLowerCase();
+      if (!["by", "by-sa", "cc0", "pdm"].includes(lic)) continue;
+      const imageUrl = r.thumbnail || r.url;
+      if (!imageUrl || exclude.has(imageUrl)) continue;
+      if (r.width && r.width < 900) continue;
+      const about = `${r.title ?? ""} ${(r.tags ?? []).map((t) => t.name).join(" ")}`;
+      if (!mentions(about, subject)) continue;
+      const licName =
+        lic === "cc0" ? "CC0" : lic === "pdm" ? "Public domain"
+          : `CC ${lic.toUpperCase()}${r.license_version ? ` ${r.license_version}` : ""}`;
+      const creator = r.creator || "Unknown author";
+      const where = r.source || "Openverse";
+      const page = r.foreign_landing_url || r.url;
+      out.push({
+        url: imageUrl,
+        page,
+        credit: `${creator}, ${licName} (${where})`,
+        creditHtml: `<a href="${page}">${esc(creator)}</a>, ${esc(licName)} (${esc(where)})`,
+      });
+    }
+  } catch (e) {
+    console.log(`openverse "${subject}" failed: ${e.message}`);
+  }
+  return out;
+}
+
+// Up to `count` DIFFERENT photos of `subject`. Fewer (or none) is fine:
+// a missing photo is better than a photo of somebody else.
+async function findImages(subject, { era = "any", count = 3 } = {}) {
+  const thisYear = new Date().getUTCFullYear();
+  // For current stories, try the current and previous year in the search
+  // first: file names on Commons often carry the year.
+  const terms =
+    era === "current"
+      ? [`${subject} ${thisYear}`, `${subject} ${thisYear - 1}`, subject]
+      : [subject];
+
+  const photos = [];
+  const used = new Set();
+  const take = (list) => {
+    for (const c of list) {
+      if (photos.length >= count) return;
+      if (used.has(c.url)) continue;
+      used.add(c.url);
+      photos.push({ ...c, alt: subject });
+    }
+  };
+
+  for (const term of terms) {
+    if (photos.length >= count) break;
+    const list = (await commonsCandidates(term, subject)).slice(0, 15);
+    const pool =
+      era === "current"
+        ? list.filter((c) => c.year && c.year >= thisYear - MAX_PHOTO_AGE_YEARS)
+        : [...list].sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
+    take(pool);
+  }
+  if (era !== "current" && photos.length < count) {
+    take(await openversePhotos(subject, used));
+  }
+  console.log(`images for "${subject}" (${era}): found ${photos.length} of ${count}`);
+  return photos;
+}
+
+// Puts credited photos inside the article body: one after the third
+// paragraph and one about two-thirds of the way down.
+function addBodyImages(html, photos) {
+  if (!photos.length) return html;
+  const parts = html.split("</p>");
+  const n = parts.length - 1; // number of paragraphs
+  if (n < 1) return html;
+  const block = (p) =>
+    `<p><img src="${p.url}" alt="${esc(p.alt)}"></p><p><small><em>Photo: ${p.creditHtml}</em></small></p>`;
+  const spots = new Map();
+  const first = Math.min(2, n - 1);
+  spots.set(first, photos[0]);
+  if (photos[1]) {
+    const second = Math.min(Math.max(first + 2, Math.floor(n * 0.65)), n - 1);
+    if (second > first) spots.set(second, photos[1]);
+  }
+  let out = "";
+  for (let i = 0; i < n; i++) {
+    out += parts[i] + "</p>";
+    if (spots.has(i)) out += block(spots.get(i));
+  }
+  return out + parts[n];
 }
 
 // ---------- Prompts ----------
@@ -252,7 +394,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "category": ""}`;
 }
 
 function evergreenPrompt(avoidTitles) {
@@ -271,7 +413,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "category": ""}`;
 }
 
 // Reads the text of the news pages linked to a trend, so the article can
@@ -327,7 +469,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "imageSearch": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "category": ""}`;
 }
 
 function matchPrompt(kind, f, facts) {
@@ -694,66 +836,106 @@ async function saveDraft(a, extra) {
     ? extra.category
     : CATEGORIES[0];
 
-  // Photo: your own image if the note gave one, otherwise a free-licensed
-  // photo of the subject with its credit, otherwise the default image.
+  // Photos: a featured image plus two inside the body. Your own image
+  // (from a note) replaces the featured one. Each photo is a free-licensed
+  // photo of a subject in the article, with its credit. Current stories only
+  // get recent photos; if none is found the default image is used.
   let image = extra.image || null;
   let imageCredit = "";
   let imageSource = "";
   let bodyHtml = a.body;
-  if (!image && typeof a.imageSearch === "string" && a.imageSearch.trim()) {
-    const found = await findImage(a.imageSearch.trim());
-    if (found) {
-      image = found.url;
-      imageCredit = found.credit;
-      imageSource = found.page;
-      bodyHtml = `<p><small>Photo: ${found.creditHtml}</small></p>` + a.body;
-    }
+  const subject = String(
+    a.mainSubject || a.imageSearches?.[0] || a.imageSearch || ""
+  ).trim();
+  const photos = subject
+    ? await findImages(subject, { era: extra.era ?? "any", count: image ? 2 : 3 })
+    : [];
+  if (!image && photos.length) {
+    const featured = photos.shift();
+    image = featured.url;
+    imageCredit = featured.credit;
+    imageSource = featured.page;
+    bodyHtml = `<p><small>Photo: ${featured.creditHtml}</small></p>` + bodyHtml;
   }
+  bodyHtml = addBodyImages(bodyHtml, photos.slice(0, 2));
 
-  return db.collection(DRAFTS).add({
+  // The draft is saved in `posts` exactly like a draft written in your
+  // dashboard (status "draft"), so it shows up there. Its document ID is
+  // readable, and a reversed-time number makes the NEWEST draft sort first.
+  // The leading "-" also puts these before the random IDs.
+  const reversed = String(9999999999 - Math.floor(Date.now() / 1000)).padStart(10, "0");
+  const ref = db.collection(ARTICLES).doc(`-${reversed}-${slug(a.title).replace(/^-+|-+$/g, "")}`);
+  await ref.set({
     author: extra.author || AUTHOR,
-    title: a.title.trim(),
-    subtitle: typeof a.subtitle === "string" ? a.subtitle : "",
     body: bodyHtml,
-    snippet: a.snippet.trim(),
-    metaDescription: a.metaDescription.trim(),
-    focusKeyword: a.focusKeyword.trim(),
     category,
-    tags: Array.isArray(a.tags) ? a.tags.map(String) : [],
+    commentCount: 0,
+    date: new Date().toISOString(),
+    focusKeyword: a.focusKeyword.trim(),
     image: image || DEFAULT_IMAGE,
-    imageCredit,
-    imageSource,
-    keywordDensity: a.keywordDensity ?? null,
     imageAlt: extra.imageAlt || a.imageAlt || "",
-    // Page blocks. Defaults below; each kind of article sets its own, and
-    // you can still flip any of them on the draft before approving.
+    likedBy: [],
+    likes: 0,
+    metaDescription: a.metaDescription.trim(),
+    snippet: a.snippet.trim(),
+    status: "draft",
+    subtitle: typeof a.subtitle === "string" ? a.subtitle : "",
+    tags: Array.isArray(a.tags) ? a.tags.map(String) : [],
+    title: a.title.trim(),
+    // Page blocks. Each kind of article sets its own; flip any of them in
+    // the dashboard before you publish.
     ...{
-      footballNow: false,
-      latest: true,
-      trending: false,
+      latestStories: true,
       recommended: false,
+      trending: false,
       ...(extra.flags ?? {}),
     },
-    // Workflow fields (not copied into posts)
-    approved: false,
-    published: false,
-    source: extra.source,
-    sources: extra.sources ?? [],
-    ideaId: extra.ideaId ?? null,
-    fixtureId: extra.fixtureId ?? null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Everything the script adds, kept together in one field.
+    aiMeta: {
+      source: extra.source,
+      sources: extra.sources ?? [],
+      keywordDensity: a.keywordDensity ?? null,
+      imageCredit,
+      imageSource,
+      ideaId: extra.ideaId ?? null,
+      fixtureId: extra.fixtureId ?? null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
   });
+  return ref;
 }
 
-// How many drafts of the given kinds were made in the last 24 hours,
-// and how many drafts are waiting for review.
+// How many script drafts of the given kinds were made in the last 24 hours,
+// and how many script drafts are still waiting in the dashboard (status
+// "draft"). Drafts you wrote yourself are not counted.
 async function draftCounts(sources) {
   const since = admin.firestore.Timestamp.fromMillis(Date.now() - 24 * 3600 * 1000);
-  const last24h = await db.collection(DRAFTS).where("createdAt", ">=", since).get();
-  const madeToday = last24h.docs.filter((d) => sources.includes(d.data().source)).length;
-  const waiting = await db.collection(DRAFTS).where("approved", "==", false).get();
-  const pending = waiting.docs.filter((d) => d.data().published !== true).length;
+  const made = await db.collection(ARTICLES).where("aiMeta.createdAt", ">=", since).get();
+  const madeToday = made.docs.filter((d) => sources.includes(d.data().aiMeta?.source)).length;
+
+  const drafts = await db.collection(ARTICLES).where("status", "==", "draft").get();
+  const mine = drafts.docs.filter((d) => d.data().aiMeta);
+  const pending = mine.length;
+  if (pending >= MAX_PENDING) {
+    console.log(`waiting for review (${pending}): ${mine.map((d) => d.data().title).join(" | ")}`);
+  }
   return { madeToday, pending };
+}
+
+// Published drafts stay in article_drafts (the article itself is in posts).
+// This removes them after a while so the collection stays tidy.
+const KEEP_PUBLISHED_DAYS = 7; // set to 0 to never delete
+async function cleanupPublishedDrafts() {
+  if (!KEEP_PUBLISHED_DAYS) return;
+  const snap = await db.collection(DRAFTS).where("published", "==", true).get();
+  const cutoff = Date.now() - KEEP_PUBLISHED_DAYS * 86400000;
+  for (const d of snap.docs) {
+    const at = d.data().createdAt?.toMillis?.() ?? 0;
+    if (at && at < cutoff) {
+      await d.ref.delete();
+      console.log(`removed old published draft "${d.data().title ?? d.id}"`);
+    }
+  }
 }
 
 // ---------- 1) Publish approved drafts ----------
@@ -769,6 +951,7 @@ async function publishApproved() {
       } = d;
       const ref = await db.collection(ARTICLES).add({
         ...article,
+        status: "published",
         date: new Date().toISOString(),
         // readAt is left out on purpose: the app records it when an
         // article is read, and a brand-new post hasn't been read yet.
@@ -861,7 +1044,7 @@ async function makeMatchDrafts() {
       const a = parseJson(text);
       const ref = await saveDraft(a, {
         category: NATIONAL_LEAGUES.includes(f.league.id) ? "national" : "club",
-        flags: { footballNow: true },
+        era: "current",
         imageAlt: a.imageAlt || `${f.teams.home.name} vs ${f.teams.away.name}`,
         source: kind === "report" ? "match_report" : "match_preview",
         fixtureId: id,
@@ -871,7 +1054,7 @@ async function makeMatchDrafts() {
         at: admin.firestore.FieldValue.serverTimestamp(),
       });
       made++;
-      console.log(`match ${kind} draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+      console.log(`match ${kind} draft: "${a.title}" (${ARTICLES}/${ref.id})`);
     } catch (e) {
       failures++;
       console.log(`match ${key} failed: ${e.message}`);
@@ -936,12 +1119,17 @@ async function fetchTrends() {
 }
 
 async function recentTitles() {
-  const recent = await db
-    .collection(DRAFTS)
-    .orderBy("createdAt", "desc")
-    .limit(20)
-    .get();
-  return recent.docs.map((d) => d.data().title).filter(Boolean);
+  const titles = [];
+  try {
+    const posts = await db.collection(ARTICLES).orderBy("date", "desc").limit(50).get();
+    for (const d of posts.docs) {
+      const t = d.data().title;
+      if (t) titles.push(t);
+    }
+  } catch (e) {
+    console.log(`could not read recent posts: ${e.message}`);
+  }
+  return titles;
 }
 
 async function makeTrendingDrafts() {
@@ -967,11 +1155,12 @@ async function makeTrendingDrafts() {
         const ref = await saveDraft(a, {
           category: a.category,
           source: "trending",
-          flags: { footballNow: true, trending: true },
+          flags: { trending: true },
+          era: "current",
           sources,
         });
         avoid.push(a.title);
-        console.log(`trending draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+        console.log(`trending draft: "${a.title}" (${ARTICLES}/${ref.id})`);
       } catch (e) {
         console.log(`trending draft failed: ${e.message}`);
       }
@@ -1007,7 +1196,8 @@ async function makeTrendingDrafts() {
       const ref = await saveDraft(a, {
         category: a.category,
         source: "trending",
-        flags: { footballNow: true, trending: true },
+        flags: { trending: true },
+        era: "current",
         sources: t.news.map((n) => n.url).filter(Boolean).slice(0, 6),
       });
       await db.doc(`${LOG}/${key}`).set({
@@ -1015,7 +1205,7 @@ async function makeTrendingDrafts() {
         at: admin.firestore.FieldValue.serverTimestamp(),
       });
       made++;
-      console.log(`trending draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+      console.log(`trending draft: "${a.title}" (${ARTICLES}/${ref.id})`);
     } catch (e) {
       failures++;
       console.log(`trending "${t.term}" failed: ${e.message}`);
@@ -1045,9 +1235,10 @@ async function makeEvergreenDrafts() {
         category: a.category,
         source: "evergreen",
         flags: { recommended: true },
+        era: "any",
       });
       avoid.push(a.title);
-      console.log(`evergreen draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+      console.log(`evergreen draft: "${a.title}" (${ARTICLES}/${ref.id})`);
     } catch (e) {
       console.log(`evergreen draft failed: ${e.message}`);
     }
@@ -1074,8 +1265,9 @@ async function makeNoteDrafts() {
       const ref = await saveDraft(a, {
         category: note.category,
         author: idea.author,
+        era: idea.topic ? "current" : "any",
         flags: Object.fromEntries(
-          ["footballNow", "latest", "trending", "recommended"]
+          ["latestStories", "trending", "recommended"]
             .filter((k) => typeof idea[k] === "boolean")
             .map((k) => [k, idea[k]])
         ),
@@ -1085,7 +1277,7 @@ async function makeNoteDrafts() {
         ideaId: doc.id,
       });
       await doc.ref.update({ status: "done", draftId: ref.id });
-      console.log(`note draft: "${a.title}" (${DRAFTS}/${ref.id})`);
+      console.log(`note draft: "${a.title}" (${ARTICLES}/${ref.id})`);
     } catch (e) {
       console.log(`note ${doc.id} failed: ${e.message}`);
       await doc.ref.update({
@@ -1097,6 +1289,7 @@ async function makeNoteDrafts() {
 }
 
 await publishApproved();
+await cleanupPublishedDrafts();
 await makeMatchDrafts();
 await makeTrendingDrafts();
 await makeEvergreenDrafts();
