@@ -143,6 +143,7 @@ function parseJson(text) {
 const FORMAT_RULES = `- In your own original wording. Never copy sentences from any source and never quote people.
 - "body" is HTML using only <p>, <h2>, <strong>, <ul> and <li>. No <h1>, no images, no links.
 - READABILITY: write SHORT paragraphs. Every <p> has 1 to 3 sentences and about 40 words at most, never more. Sentences average about 20 words or fewer, in plain simple words. Break each <h2> section into several short paragraphs so it is easy to read on a phone.
+- The TITLE MUST contain the exact focus keyword phrase, ideally near the start. The subtitle and the metaDescription must contain it too. This is the most important rule.
 - KEYWORD DENSITY: the exact focus keyword phrase must appear in the body text about once every 50 to 60 words (a density of roughly 1.5% to 2.2%, never above 2.5%), whatever the article's length. Do NOT change how long the article is to reach this; keep the length asked for above. Use it in the first paragraph, in some <h2> headings, and spread evenly through the article, written naturally. Do not count the title.
 - "snippet": the first one or two sentences as plain text, at most 200 characters.
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
@@ -176,14 +177,26 @@ const yearOf = (text) => {
 };
 const norm = (x) =>
   String(x ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-// True when every word of the subject's name appears in the text.
-const mentions = (text, subject) => {
-  const hay = norm(text);
-  const words = norm(subject).split(/[^a-z0-9]+/).filter((w) => w.length > 2);
-  return words.length > 0 && words.every((w) => hay.includes(w));
+// Text reduced to lowercase words with single spaces around it, so the
+// subject's FULL NAME can be matched as a phrase ("steven gerrard"), never
+// as separate words found in different places.
+const clean = (x) => " " + norm(x).replace(/[^a-z0-9]+/g, " ").trim() + " ";
+const hasPhrase = (text, subject) => {
+  const phrase = clean(subject).trim();
+  return phrase.length > 2 && clean(text).includes(` ${phrase} `);
 };
 
-// Wikimedia Commons: usable photos of `subject`, in relevance order.
+// Wikimedia Commons: usable photos of `subject`, each with a quality score.
+// A photo is only accepted if the subject's full name is in the photo's own
+// file name or in one of its categories. The score then ranks the photos so
+// the best one can be the featured image:
+//   +5 name in the file name (usually a portrait or action shot of them)
+//   +3 the photo sits in a category named exactly after them (+1 if only a
+//      longer category mentions them)
+//   +3 Wikimedia has marked it as a quality or featured picture
+//   -2 the file name suggests a group, crowd or other people ("and", "with",
+//      "v", "fans", "team")
+//   +0 to 2 for resolution, +0 to 1 for being newer
 async function commonsCandidates(term, subject) {
   try {
     const url =
@@ -205,9 +218,8 @@ async function commonsCandidates(term, subject) {
       return [];
     }
     const data = await res.json();
-    const pages = Object.values(data.query?.pages ?? {}).sort(
-      (a, b) => (a.index ?? 0) - (b.index ?? 0)
-    );
+    const pages = Object.values(data.query?.pages ?? {});
+    const target = clean(subject).trim();
     const out = [];
     for (const p of pages) {
       const info = p.imageinfo?.[0];
@@ -216,20 +228,33 @@ async function commonsCandidates(term, subject) {
       const meta = info.extmetadata ?? {};
       const license = (meta.LicenseShortName?.value ?? "").trim();
       if (!license || !FREE_LICENSE.test(license) || BAD_LICENSE.test(license)) continue;
-      // The photo must really be of the subject.
-      const about = [
-        p.title,
-        meta.ObjectName?.value,
-        meta.Categories?.value,
-        meta.ImageDescription?.value,
-      ].map((v) => decode(String(v ?? ""))).join(" ");
-      if (!mentions(about, subject)) continue;
+
+      const fileName = decode(String(p.title ?? "")).replace(/^File:/i, "").replace(/\.[a-z0-9]+$/i, "");
+      const inName =
+        hasPhrase(fileName, subject) || hasPhrase(decode(String(meta.ObjectName?.value ?? "")), subject);
+      const cats = decode(String(meta.Categories?.value ?? "")).split("|");
+      const inCat = cats.some((c) => hasPhrase(c, subject));
+      const catExact = cats.some((c) => clean(c).trim() === target);
+      if (!inName && !inCat) continue; // not clearly a photo of the subject
+
+      const year = yearOf(decode(meta.DateTimeOriginal?.value ?? ""));
+      let score = 0;
+      if (inName) score += 5;
+      if (catExact) score += 3;
+      else if (inCat) score += 1;
+      if (/quality images|featured pictures/i.test(cats.join(" "))) score += 3;
+      if (/\b(and|with|v|vs|versus|fans|crowd|team|squad|group)\b/.test(norm(fileName))) score -= 2;
+      score += Math.min(info.width, 4000) / 2000;
+      if (year) score += Math.max(0, Math.min(year - 2000, 26)) / 26;
+
       const artist = decode(meta.Artist?.value ?? "") || "Unknown author";
       const page = info.descriptionurl;
       out.push({
         url: info.thumburl || info.url,
         page,
-        year: yearOf(decode(meta.DateTimeOriginal?.value ?? "")),
+        year,
+        score,
+        file: p.title,
         credit: `${artist}, ${license} (Wikimedia Commons)`,
         creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
       });
@@ -242,8 +267,9 @@ async function commonsCandidates(term, subject) {
 }
 
 // Openverse (free-licensed photos from Flickr and others). It does not say
-// when a photo was taken, so it is only used for timeless articles.
-async function openversePhotos(subject, exclude) {
+// when a photo was taken, so it is only used for timeless articles, and only
+// when the subject's full name is in the photo's title or is one of its tags.
+async function openversePhotos(subject) {
   const out = [];
   try {
     const url =
@@ -260,14 +286,16 @@ async function openversePhotos(subject, exclude) {
       return out;
     }
     const data = await res.json();
+    const target = clean(subject).trim();
     for (const r of data.results ?? []) {
       const lic = String(r.license ?? "").toLowerCase();
       if (!["by", "by-sa", "cc0", "pdm"].includes(lic)) continue;
       const imageUrl = r.thumbnail || r.url;
-      if (!imageUrl || exclude.has(imageUrl)) continue;
+      if (!imageUrl) continue;
       if (r.width && r.width < 900) continue;
-      const about = `${r.title ?? ""} ${(r.tags ?? []).map((t) => t.name).join(" ")}`;
-      if (!mentions(about, subject)) continue;
+      const inTitle = hasPhrase(r.title ?? "", subject);
+      const inTag = (r.tags ?? []).some((t) => clean(t.name).trim() === target);
+      if (!inTitle && !inTag) continue;
       const licName =
         lic === "cc0" ? "CC0" : lic === "pdm" ? "Public domain"
           : `CC ${lic.toUpperCase()}${r.license_version ? ` ${r.license_version}` : ""}`;
@@ -277,6 +305,8 @@ async function openversePhotos(subject, exclude) {
       out.push({
         url: imageUrl,
         page,
+        score: (inTitle ? 3 : 0) + (inTag ? 1 : 0), // always below a good Commons photo
+        file: r.title,
         credit: `${creator}, ${licName} (${where})`,
         creditHtml: `<a href="${page}">${esc(creator)}</a>, ${esc(licName)} (${esc(where)})`,
       });
@@ -287,41 +317,46 @@ async function openversePhotos(subject, exclude) {
   return out;
 }
 
-// Up to `count` DIFFERENT photos of `subject`. Fewer (or none) is fine:
-// a missing photo is better than a photo of somebody else.
+// Up to `count` DIFFERENT photos of `subject`, best first (the first one is
+// used as the featured image). Fewer, or none, is fine: a missing photo is
+// better than a photo of somebody else.
 async function findImages(subject, { era = "any", count = 3 } = {}) {
   const thisYear = new Date().getUTCFullYear();
-  // For current stories, try the current and previous year in the search
-  // first: file names on Commons often carry the year.
+  // For current stories, also search with the current and previous year:
+  // file names on Commons often carry the year.
   const terms =
     era === "current"
       ? [`${subject} ${thisYear}`, `${subject} ${thisYear - 1}`, subject]
-      : [subject];
+      : [subject, `${subject} portrait`];
 
-  const photos = [];
-  const used = new Set();
-  const take = (list) => {
+  const pool = new Map(); // url -> candidate
+  const add = (list) => {
     for (const c of list) {
-      if (photos.length >= count) return;
-      if (used.has(c.url)) continue;
-      used.add(c.url);
-      photos.push({ ...c, alt: subject });
+      const old = pool.get(c.url);
+      if (!old || c.score > old.score) pool.set(c.url, c);
     }
   };
+  for (const term of terms) add(await commonsCandidates(term, subject));
 
-  for (const term of terms) {
-    if (photos.length >= count) break;
-    const list = (await commonsCandidates(term, subject)).slice(0, 15);
-    const pool =
-      era === "current"
-        ? list.filter((c) => c.year && c.year >= thisYear - MAX_PHOTO_AGE_YEARS)
-        : [...list].sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
-    take(pool);
+  let list = [...pool.values()];
+  if (era === "current") {
+    list = list.filter((c) => c.year && c.year >= thisYear - MAX_PHOTO_AGE_YEARS);
   }
+  list.sort((a, b) => b.score - a.score);
+  let photos = list.slice(0, count);
+
   if (era !== "current" && photos.length < count) {
-    take(await openversePhotos(subject, used));
+    const have = new Set(photos.map((p) => p.url));
+    const more = (await openversePhotos(subject))
+      .filter((c) => !have.has(c.url))
+      .sort((a, b) => b.score - a.score);
+    photos = photos.concat(more).slice(0, count);
   }
-  console.log(`images for "${subject}" (${era}): found ${photos.length} of ${count}`);
+  photos = photos.map((p) => ({ ...p, alt: subject }));
+  console.log(
+    `images for "${subject}" (${era}): found ${photos.length} of ${count}` +
+      photos.map((p, i) => `\n  ${i === 0 ? "featured" : "body"}: ${p.file} (score ${p.score.toFixed(1)})`).join("")
+  );
   return photos;
 }
 
@@ -823,6 +858,52 @@ async function fixDensity(a) {
   return a;
 }
 
+// ---------- Keyword in the title (and subtitle, meta description) ----------
+// The title must contain the exact focus keyword. The lighter backup model
+// sometimes forgets, so every draft is checked here whatever model wrote it.
+function placementPrompt(a, kw) {
+  return `Fix these parts of a football article so that EACH ONE contains the exact phrase "${kw}" (capital letters do not matter).
+
+RULES:
+- title: natural, under 65 characters, with the phrase at or near the start.
+- subtitle: one sentence, under 140 characters.
+- metaDescription: at most 155 characters.
+- Keep the same meaning. Do not add any new facts, numbers or names.
+
+CURRENT TITLE: ${a.title}
+CURRENT SUBTITLE: ${a.subtitle || "(none)"}
+CURRENT META DESCRIPTION: ${a.metaDescription}
+ARTICLE OPENING: ${plainText(a.body).slice(0, 400)}
+
+Return ONLY a JSON object: {"title": "", "subtitle": "", "metaDescription": ""}`;
+}
+
+async function ensureKeywordPlacement(a) {
+  const kw = a.focusKeyword.trim();
+  const ok = (v) => typeof v === "string" && hasPhrase(v, kw);
+  for (let i = 0; i < 2; i++) {
+    if (ok(a.title) && ok(a.subtitle) && ok(a.metaDescription)) return a;
+    console.log(`keyword "${kw}" missing from title/subtitle/meta, fixing (try ${i + 1})`);
+    try {
+      const { text } = await gemini(placementPrompt(a, kw));
+      const r = parseJson(text);
+      // Only accept a fix if it really contains the keyword.
+      if (ok(r.title)) a.title = r.title.trim();
+      if (ok(r.subtitle)) a.subtitle = r.subtitle.trim();
+      if (ok(r.metaDescription)) a.metaDescription = r.metaDescription.trim();
+    } catch (e) {
+      console.log(`keyword fix failed: ${e.message}`);
+      break;
+    }
+  }
+  // Last resort: the title MUST have the keyword.
+  if (!ok(a.title)) {
+    a.title = `${kw}: ${a.title}`;
+    console.log(`keyword added to the title directly: "${a.title}"`);
+  }
+  return a;
+}
+
 // ---------- Saving a draft ----------
 async function saveDraft(a, extra) {
   for (const k of ["title", "body", "snippet", "metaDescription", "focusKeyword"]) {
@@ -831,6 +912,7 @@ async function saveDraft(a, extra) {
     }
   }
   a = await fixDensity(a);
+  a = await ensureKeywordPlacement(a);
 
   const category = CATEGORIES.includes(extra.category)
     ? extra.category
@@ -861,10 +943,19 @@ async function saveDraft(a, extra) {
 
   // The draft is saved in `posts` exactly like a draft written in your
   // dashboard (status "draft"), so it shows up there. Its document ID is
-  // readable, and a reversed-time number makes the NEWEST draft sort first.
-  // The leading "-" also puts these before the random IDs.
-  const reversed = String(9999999999 - Math.floor(Date.now() / 1000)).padStart(10, "0");
-  const ref = db.collection(ARTICLES).doc(`-${reversed}-${slug(a.title).replace(/^-+|-+$/g, "")}`);
+  // plain English: the keyword first, then the title, then the date, for
+  // example  -ballon-d-or--how-is-the-ballon-d-or-winner-chosen-2026-10-03
+  // The leading "-" keeps all of these together at the top of the list.
+  const trim = (x) => x.replace(/^-+|-+$/g, "");
+  const kw = trim(slug(a.focusKeyword));
+  const ti = trim(slug(a.title));
+  const words = ti.startsWith(kw) ? ti : `${kw}--${ti}`;
+  const stamp = new Date().toISOString();
+  let id = `-${trim(words.slice(0, 90))}-${stamp.slice(0, 10)}`;
+  if ((await db.collection(ARTICLES).doc(id).get()).exists) {
+    id += `-${stamp.slice(11, 16).replace(":", "")}`; // never overwrite an existing article
+  }
+  const ref = db.collection(ARTICLES).doc(id);
   await ref.set({
     author: extra.author || AUTHOR,
     body: bodyHtml,
