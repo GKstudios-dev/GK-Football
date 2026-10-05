@@ -46,7 +46,7 @@ const AUTO_MATCH = process.env.AUTO_MATCH !== "off";       // match reports + pr
 // "search" = Gemini searches Google (needs billing), "off" = none.
 const TRENDING = process.env.TRENDING || "trends";
 const EVERGREEN = process.env.EVERGREEN !== "off";         // timeless explainers
-const TRENDS_GEOS = ["GB", "US", "GH", "NG"];              // countries to read trends from
+const TRENDS_GEOS = ["GB", "IE", "US", "GH", "NG", "ZA", "KE", "AU"]; // English-speaking countries to read trends from
 
 const MATCH_PER_RUN = 2;        // match drafts per run
 const MATCH_PER_DAY = 6;        // match drafts per 24 hours
@@ -151,9 +151,10 @@ const FORMAT_RULES = `- In your own original wording. Never copy sentences from 
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
 - "tags": 3 to 6 short lowercase tags.
 - "imageAlt": a short description of a suitable image.
-- "mainSubject": the ONE person, club, national team or stadium the article is mostly about, as a real name that photographers would label (for example "Cristiano Ronaldo" or "Manchester City"). All the article's photos will be photos of this subject, so name it precisely.`;
+- "mainSubject": the ONE person, club, national team or stadium the article is mostly about, as a real name that photographers would label (for example "Cristiano Ronaldo" or "Manchester City"). The featured photo will be of this subject, so name it precisely.
+- "otherSubjects": up to 2 other specific people, clubs or stadiums that the article discusses BY NAME in its body (for example players or managers given as examples). Use their full real names exactly as written in the body. An empty list is fine; never invent names that are not in the body.`;
 
-const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": ""}`;
+const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": []}`;
 
 // ---------- Images (free-licensed, with credit) ----------
 // Every photo in an article is a photo of the article's MAIN SUBJECT (for
@@ -165,13 +166,14 @@ const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "me
 // (CC BY, CC BY-SA, CC0, public domain) and every photo is credited.
 //
 // era "current": news and match articles. Only photos taken in the last two
-//   years are used (the photo's own date must be known), so an old picture is
-//   never used for a current story.
+//   six years are used, and the newest score highest, so an old picture is
+//   never used for a current story. The date comes from the photo's own data,
+//   or from the year in its file name.
 // era "any": timeless articles. Any date is fine, newest preferred.
 const WIKI_UA = "FootballPostArticleBot/1.0 (GitHub Actions article job)";
 const FREE_LICENSE = /^(cc[ -]?by|cc0|public domain|pd)/i;
 const BAD_LICENSE = /\b(nc|nd)\b|fair use|non-?commercial|no derivatives/i;
-const MAX_PHOTO_AGE_YEARS = 2;
+const MAX_PHOTO_AGE_YEARS = 6; // recent photos are strongly preferred inside this window
 const esc = (x) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const yearOf = (text) => {
   const m = /(?:19|20)\d{2}/.exec(text ?? "");
@@ -188,83 +190,150 @@ const hasPhrase = (text, subject) => {
   return phrase.length > 2 && clean(text).includes(` ${phrase} `);
 };
 
-// Wikimedia Commons: usable photos of `subject`, each with a quality score.
-// A photo is only accepted if the subject's full name is in the photo's own
-// file name or in one of its categories. The score then ranks the photos so
-// the best one can be the featured image:
+// Wikimedia Commons. Three ways of finding photos of `subject`, all feeding
+// one pool that is then ranked:
+//   1. text search of file names and descriptions
+//   2. the subject's own Commons category (for example "Category:Sean Dyche"),
+//      which lists every photo filed under that name
+//   3. the photo used at the top of the subject's Wikipedia page, which is
+//      normally the best, most representative one
+// Every photo gets a quality score. A photo (except the Wikipedia one) is only
+// accepted if the subject's full name is in its file name or a category:
 //   +5 name in the file name (usually a portrait or action shot of them)
 //   +3 the photo sits in a category named exactly after them (+1 if only a
 //      longer category mentions them)
 //   +3 Wikimedia has marked it as a quality or featured picture
+//   +6 it is the photo at the top of their Wikipedia page
 //   -2 the file name suggests a group, crowd or other people ("and", "with",
 //      "v", "fans", "team")
 //   +0 to 2 for resolution, +0 to 1 for being newer
-async function commonsCandidates(term, subject) {
+const COMMONS_API = "https://commons.wikimedia.org/w/api.php?";
+
+async function commonsQuery(params, label) {
   try {
-    const url =
-      "https://commons.wikimedia.org/w/api.php?" +
-      new URLSearchParams({
-        action: "query",
-        format: "json",
-        generator: "search",
-        gsrnamespace: "6",
-        gsrsearch: `${term} filetype:bitmap`,
-        gsrlimit: "40",
-        prop: "imageinfo",
-        iiprop: "url|size|mime|extmetadata",
-        iiurlwidth: "1200",
-      });
-    const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
+    const res = await fetch(
+      COMMONS_API +
+        new URLSearchParams({
+          action: "query",
+          format: "json",
+          prop: "imageinfo",
+          iiprop: "url|size|mime|extmetadata",
+          iiurlwidth: "1200",
+          ...params,
+        }),
+      { headers: { "User-Agent": WIKI_UA } }
+    );
     if (!res.ok) {
-      console.log(`image search "${term}": HTTP ${res.status}`);
+      console.log(`${label}: HTTP ${res.status}`);
       return [];
     }
     const data = await res.json();
-    const pages = Object.values(data.query?.pages ?? {});
-    const target = clean(subject).trim();
-    const out = [];
-    for (const p of pages) {
-      const info = p.imageinfo?.[0];
-      if (!info || !/^image\/(jpeg|png|webp)$/.test(info.mime)) continue;
-      if (info.width < 900 || info.width < info.height) continue;
-      const meta = info.extmetadata ?? {};
-      const license = (meta.LicenseShortName?.value ?? "").trim();
-      if (!license || !FREE_LICENSE.test(license) || BAD_LICENSE.test(license)) continue;
-
-      const fileName = decode(String(p.title ?? "")).replace(/^File:/i, "").replace(/\.[a-z0-9]+$/i, "");
-      const inName =
-        hasPhrase(fileName, subject) || hasPhrase(decode(String(meta.ObjectName?.value ?? "")), subject);
-      const cats = decode(String(meta.Categories?.value ?? "")).split("|");
-      const inCat = cats.some((c) => hasPhrase(c, subject));
-      const catExact = cats.some((c) => clean(c).trim() === target);
-      if (!inName && !inCat) continue; // not clearly a photo of the subject
-
-      const year = yearOf(decode(meta.DateTimeOriginal?.value ?? ""));
-      let score = 0;
-      if (inName) score += 5;
-      if (catExact) score += 3;
-      else if (inCat) score += 1;
-      if (/quality images|featured pictures/i.test(cats.join(" "))) score += 3;
-      if (/\b(and|with|v|vs|versus|fans|crowd|team|squad|group)\b/.test(norm(fileName))) score -= 2;
-      score += Math.min(info.width, 4000) / 2000;
-      if (year) score += Math.max(0, Math.min(year - 2000, 26)) / 26;
-
-      const artist = decode(meta.Artist?.value ?? "") || "Unknown author";
-      const page = info.descriptionurl;
-      out.push({
-        url: info.thumburl || info.url,
-        page,
-        year,
-        score,
-        inName,
-        file: p.title,
-        credit: `${artist}, ${license} (Wikimedia Commons)`,
-        creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
-      });
-    }
-    return out;
+    return Object.values(data.query?.pages ?? {});
   } catch (e) {
-    console.log(`image search "${term}" failed: ${e.message}`);
+    console.log(`${label} failed: ${e.message}`);
+    return [];
+  }
+}
+
+// One Commons file -> a scored candidate, or null if it cannot be used.
+function toCandidate(p, subject, { lead = false } = {}) {
+  const info = p.imageinfo?.[0];
+  if (!info || !/^image\/(jpeg|png|webp)$/.test(info.mime)) return null;
+  if (info.width < 900 || info.width < info.height) return null;
+  const meta = info.extmetadata ?? {};
+  const license = (meta.LicenseShortName?.value ?? "").trim();
+  if (!license || !FREE_LICENSE.test(license) || BAD_LICENSE.test(license)) return null;
+
+  const target = clean(subject).trim();
+  const fileName = decode(String(p.title ?? "")).replace(/^File:/i, "").replace(/\.[a-z0-9]+$/i, "");
+  const inName =
+    hasPhrase(fileName, subject) || hasPhrase(decode(String(meta.ObjectName?.value ?? "")), subject);
+  const cats = decode(String(meta.Categories?.value ?? "")).split("|");
+  const inCat = cats.some((c) => hasPhrase(c, subject));
+  const catExact = cats.some((c) => clean(c).trim() === target);
+  if (!inName && !inCat && !lead) return null; // not clearly a photo of the subject
+
+  const year = yearOf(decode(meta.DateTimeOriginal?.value ?? "")) ?? yearOf(fileName);
+  let score = 0;
+  if (inName) score += 5;
+  if (catExact) score += 3;
+  else if (inCat) score += 1;
+  if (lead) score += 6;
+  if (/quality images|featured pictures/i.test(cats.join(" "))) score += 3;
+  if (/\b(and|with|v|vs|versus|fans|crowd|team|squad|group)\b/.test(norm(fileName))) score -= 2;
+  score += Math.min(info.width, 4000) / 2000;
+  if (year) score += Math.max(0, Math.min(year - 2000, 26)) / 26;
+
+  const artist = decode(meta.Artist?.value ?? "") || "Unknown author";
+  const page = info.descriptionurl;
+  return {
+    url: info.thumburl || info.url,
+    page,
+    year,
+    score,
+    inName,
+    lead,
+    file: p.title,
+    credit: `${artist}, ${license} (Wikimedia Commons)`,
+    creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
+  };
+}
+
+async function commonsCandidates(term, subject) {
+  const pages = await commonsQuery(
+    {
+      generator: "search",
+      gsrnamespace: "6",
+      gsrsearch: `${term} filetype:bitmap`,
+      gsrlimit: "40",
+    },
+    `image search "${term}"`
+  );
+  return pages.map((p) => toCandidate(p, subject)).filter(Boolean);
+}
+
+// Every photo filed under the subject's own category, if there is one.
+async function commonsCategoryCandidates(subject) {
+  const pages = await commonsQuery(
+    {
+      generator: "categorymembers",
+      gcmtitle: `Category:${subject}`,
+      gcmtype: "file",
+      gcmlimit: "50",
+    },
+    `category "${subject}"`
+  );
+  return pages.map((p) => toCandidate(p, subject)).filter(Boolean);
+}
+
+// The photo shown at the top of the subject's Wikipedia page, when it is a
+// free photo stored on Commons.
+async function wikipediaLeadCandidates(subject) {
+  try {
+    const res = await fetch(
+      "https://en.wikipedia.org/w/api.php?" +
+        new URLSearchParams({
+          action: "query",
+          format: "json",
+          generator: "search",
+          gsrsearch: subject,
+          gsrlimit: "3",
+          prop: "pageimages",
+          piprop: "name",
+        }),
+      { headers: { "User-Agent": WIKI_UA } }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    const pages = Object.values(data.query?.pages ?? {}).sort(
+      (a, b) => (a.index ?? 0) - (b.index ?? 0)
+    );
+    const page = pages.find((x) => x.pageimage && hasPhrase(x.title ?? "", subject));
+    if (!page) return [];
+    const files = await commonsQuery({ titles: `File:${page.pageimage}` }, "wikipedia photo");
+    return files.map((f) => toCandidate(f, subject, { lead: true })).filter(Boolean);
+  } catch (e) {
+    console.log(`wikipedia photo for "${subject}" failed: ${e.message}`);
     return [];
   }
 }
@@ -329,6 +398,8 @@ async function openversePhotos(subject) {
 // the photo's own labels (checked above), while Gemini checks the kind of
 // picture and writes a true description for the alt text.
 const MAX_PHOTO_CHECKS = 8;
+const MAX_OTHER_SUBJECTS = 2; // other named people or clubs that may get a photo
+const MAX_BODY_IMAGES = 2;    // photos inside the article body (plus 1 featured = 3 in total)
 
 function visionPrompt(subject) {
   return `An article about "${subject}" needs a photo. Look at the image carefully.
@@ -413,11 +484,18 @@ async function findImages(subject, { era = "any", count = 3 } = {}) {
       if (!old || c.score > old.score) pool.set(c.url, c);
     }
   };
+  add(await wikipediaLeadCandidates(subject));
+  add(await commonsCategoryCandidates(subject));
   for (const term of terms) add(await commonsCandidates(term, subject));
 
   let list = [...pool.values()];
   if (era === "current") {
-    list = list.filter((c) => c.year && c.year >= thisYear - MAX_PHOTO_AGE_YEARS);
+    // Recent photos only, newest strongly preferred. A Wikipedia lead photo
+    // with no date is allowed.
+    list = list.filter((c) => (c.year ? c.year >= thisYear - MAX_PHOTO_AGE_YEARS : c.lead));
+    for (const c of list) {
+      if (c.year) c.score += Math.max(0, 1 - (thisYear - c.year) / (MAX_PHOTO_AGE_YEARS + 1)) * 4;
+    }
   }
   list.sort((a, b) => b.score - a.score);
 
@@ -444,26 +522,50 @@ async function findImages(subject, { era = "any", count = 3 } = {}) {
   return photos;
 }
 
-// Puts credited photos inside the article body: one after the third
-// paragraph and one about two-thirds of the way down.
+// Puts credited photos inside the article body.
+// - A photo of another person or club named in the article (it has a
+//   `subject`) goes right after the first paragraph that mentions them.
+// - Any other photo (an extra of the main subject) is spread through the
+//   article. Photos are never placed in neighbouring paragraphs.
+const lastWord = (name) => String(name).trim().split(/\s+/).pop();
+const mentionsName = (text, name) =>
+  hasPhrase(text, name) || (lastWord(name).length >= 4 && hasPhrase(text, lastWord(name)));
+
 function addBodyImages(html, photos) {
   if (!photos.length) return html;
   const parts = html.split("</p>");
   const n = parts.length - 1; // number of paragraphs
   if (n < 1) return html;
+  const texts = parts.slice(0, n).map(plainText);
+  const placed = new Map(); // paragraph index -> photo
+  const isFree = (i) =>
+    i >= 0 && i < n && ![...placed.keys()].some((u) => Math.abs(u - i) < 2);
+  const putNear = (from, photo) => {
+    for (let i = Math.max(from, 1 <= n - 1 ? 1 : 0); i < n; i++) {
+      if (isFree(i)) {
+        placed.set(i, photo);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (const p of photos.filter((x) => x.subject)) {
+    const at = texts.findIndex((t) => mentionsName(t, p.subject));
+    if (at >= 0) putNear(at, p);
+  }
+  const extras = photos.filter((x) => !x.subject);
+  extras.forEach((p, k) => {
+    const target = Math.floor(n * (extras.length === 1 ? 0.65 : k === 0 ? 0.35 : 0.7));
+    if (!putNear(Math.max(target, 2), p)) putNear(1, p);
+  });
+
   const block = (p) =>
     `<p><img src="${p.url}" alt="${esc(p.alt)}"></p><p><small><em>Photo: ${p.creditHtml}</em></small></p>`;
-  const spots = new Map();
-  const first = Math.min(2, n - 1);
-  spots.set(first, photos[0]);
-  if (photos[1]) {
-    const second = Math.min(Math.max(first + 2, Math.floor(n * 0.65)), n - 1);
-    if (second > first) spots.set(second, photos[1]);
-  }
   let out = "";
   for (let i = 0; i < n; i++) {
     out += parts[i] + "</p>";
-    if (spots.has(i)) out += block(spots.get(i));
+    if (placed.has(i)) out += block(placed.get(i));
   }
   return out + parts[n];
 }
@@ -513,7 +615,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": [], "category": ""}`;
 }
 
 function evergreenPrompt(avoidTitles) {
@@ -532,7 +634,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": [], "category": ""}`;
 }
 
 // Reads the text of the news pages linked to a trend, so the article can
@@ -588,7 +690,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": [], "category": ""}`;
 }
 
 function matchPrompt(kind, f, facts) {
@@ -1055,14 +1157,16 @@ async function saveDraft(a, extra) {
   let imageSource = "";
   let imageAlt = extra.imageAlt || a.imageAlt || "";
   let bodyHtml = a.body;
+  const era = extra.era ?? "any";
   const subject = String(
     a.mainSubject || a.imageSearches?.[0] || a.imageSearch || ""
   ).trim();
-  const photos = subject
-    ? await findImages(subject, { era: extra.era ?? "any", count: image ? 2 : 3 })
+  // Photos of the main subject: the best is the featured image.
+  const mainPhotos = subject
+    ? await findImages(subject, { era, count: image ? 1 : 2 })
     : [];
-  if (!image && photos.length) {
-    const featured = photos.shift();
+  if (!image && mainPhotos.length) {
+    const featured = mainPhotos.shift();
     image = featured.url;
     imageCredit = featured.credit;
     imageSource = featured.page;
@@ -1071,7 +1175,21 @@ async function saveDraft(a, extra) {
   } else if (!image) {
     imageAlt = "Football"; // the default image is generic
   }
-  bodyHtml = addBodyImages(bodyHtml, photos.slice(0, 2));
+
+  // Other people or clubs the article names get their own photo, placed where
+  // they are mentioned. Never forced: a name with no good photo is skipped.
+  const others = [];
+  const names = (Array.isArray(a.otherSubjects) ? a.otherSubjects : [])
+    .map((n) => String(n).trim())
+    .filter((n) => n && !hasPhrase(n, subject) && !hasPhrase(subject, n))
+    .filter((n) => mentionsName(plainText(a.body), n))
+    .slice(0, MAX_OTHER_SUBJECTS);
+  for (const name of names) {
+    const found = await findImages(name, { era, count: 1 });
+    if (found[0]) others.push({ ...found[0], subject: name });
+  }
+  const bodyPhotos = [...others, ...mainPhotos].slice(0, MAX_BODY_IMAGES);
+  bodyHtml = addBodyImages(bodyHtml, bodyPhotos);
 
   // The draft is saved in `posts` exactly like a draft written in your
   // dashboard (status "draft"), so it shows up there. Its document ID is
@@ -1247,6 +1365,7 @@ async function makeMatchDrafts() {
   ];
   console.log(`match: ${reports.length} finished and ${previews.length} upcoming worth covering`);
 
+  const posts = await recentPosts(80);
   let made = 0;
   let checked = 0;
   let failures = 0;
@@ -1256,6 +1375,10 @@ async function makeMatchDrafts() {
     const id = f.fixture.id;
     const key = `${kind}_${id}`;
     if ((await db.doc(`${LOG}/${key}`).get()).exists) continue;
+    if (alreadyCovered(kind, f, posts)) {
+      console.log(`match ${key}: already covered by a recent article, skipping`);
+      continue;
+    }
 
     try {
       const facts = kind === "report" ? await reportFacts(f) : await previewFacts(f);
@@ -1341,18 +1464,85 @@ async function fetchTrends() {
   return found;
 }
 
-async function recentTitles() {
-  const titles = [];
+// The latest articles in `posts`, drafts included, with enough text to tell
+// what each one is about.
+async function recentPosts(limit = 80) {
   try {
-    const posts = await db.collection(ARTICLES).orderBy("date", "desc").limit(50).get();
-    for (const d of posts.docs) {
-      const t = d.data().title;
-      if (t) titles.push(t);
-    }
+    const snap = await db.collection(ARTICLES).orderBy("date", "desc").limit(limit).get();
+    return snap.docs.map((d) => {
+      const x = d.data();
+      return {
+        title: x.title ?? "",
+        date: x.date ?? "",
+        about: [x.title, x.focusKeyword, x.snippet, ...(Array.isArray(x.tags) ? x.tags : [])]
+          .filter(Boolean)
+          .join(" "),
+      };
+    });
   } catch (e) {
     console.log(`could not read recent posts: ${e.message}`);
+    return [];
   }
-  return titles;
+}
+
+async function recentTitles() {
+  return (await recentPosts(50)).map((p) => p.title).filter(Boolean);
+}
+
+// ---------- Never write the same story twice ----------
+// A match preview is skipped if ANY article from the last 7 days already
+// mentions both teams. A match report is only skipped if an article written
+// AFTER kick-off already mentions both teams (a preview from before the game
+// does not block the report).
+function alreadyCovered(kind, f, posts) {
+  const home = f.teams.home.name;
+  const away = f.teams.away.name;
+  const kickoff = f.fixture.timestamp * 1000;
+  const cutoff = Date.now() - 7 * 86400000;
+  return posts.some((p) => {
+    const t = Date.parse(p.date);
+    if (!(t >= cutoff)) return false;
+    if (!(hasPhrase(p.about, home) && hasPhrase(p.about, away))) return false;
+    return kind === "preview" ? true : t > kickoff;
+  });
+}
+
+// Asks Gemini which trending topics are NOT already covered by an article
+// from the last 10 days. "Same story" means the same match, event, decision,
+// transfer or incident, however the headline is worded.
+async function filterNewTopics(trends, posts) {
+  const cutoff = Date.now() - 10 * 86400000;
+  const titles = posts
+    .filter((p) => Date.parse(p.date) >= cutoff)
+    .map((p) => p.title)
+    .filter(Boolean)
+    .slice(0, 40);
+  if (!trends.length) return trends;
+
+  // Backup if Gemini is unavailable: skip a topic whose name is in a title.
+  const simple = () =>
+    trends.filter((t) => !titles.some((title) => hasPhrase(title, t.term)));
+  if (!titles.length) return trends;
+
+  try {
+    const list = trends
+      .map((t, i) => `${i}. ${t.term}${t.news[0] ? ` - ${t.news[0].title}` : ""}`)
+      .join("\n");
+    const { text } = await gemini(`ALREADY PUBLISHED OR DRAFTED IN THE LAST 10 DAYS:
+${titles.map((t) => `- ${t}`).join("\n")}
+
+CANDIDATE TOPICS:
+${list}
+
+Return the numbers of the candidates that are about a DIFFERENT story from every article above. Two things are the SAME story if they concern the same match, the same event, the same decision or sanction, the same transfer, or the same person's news from the same occasion, even when the wording or the angle is different. If two candidates are the same story as each other, return only the first. When in doubt, treat it as already covered.
+
+Return ONLY a JSON object: {"fresh": []}`);
+    const fresh = new Set(parseJson(text).fresh);
+    return trends.filter((_, i) => fresh.has(i));
+  } catch (e) {
+    console.log(`duplicate check failed (${e.message}), using the simple check`);
+    return simple();
+  }
 }
 
 async function makeTrendingDrafts() {
@@ -1392,8 +1582,11 @@ async function makeTrendingDrafts() {
   }
 
   // Free mode: Google Trends list + its headlines, no Gemini search.
-  const trends = await fetchTrends();
-  console.log(`trending: ${trends.length} football topics found in Google Trends`);
+  const found = await fetchTrends();
+  const trends = await filterNewTopics(found, await recentPosts(80));
+  console.log(
+    `trending: ${found.length} football topics found in Google Trends, ${trends.length} not covered yet`
+  );
   let made = 0;
   let failures = 0;
   for (const t of trends) {
