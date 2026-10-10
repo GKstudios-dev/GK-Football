@@ -76,6 +76,23 @@ const PRIORITY_TEAMS = [
 const LEAGUE_IDS = [39,140,78,135,61,88,94,40,71,2,1,4,3,848,203,144,179,253,262,307,128,235,98,41,42];
 const FINISHED = ["FT", "AET", "PEN"];
 
+// ---------- Time budget ----------
+// The GitHub job is cancelled if it runs past its time limit, which used to
+// throw away everything it had not finished. So the job watches its own clock:
+// no new article is started late, the number of articles per run is capped,
+// and the job stops by itself well before GitHub would cancel it.
+const START_TIME = Date.now();
+const SOFT_LIMIT_MS = 8 * 60 * 1000;   // no new article is started after this
+const HARD_LIMIT_MS = 12 * 60 * 1000;  // the job stops by itself here
+const MAX_ARTICLES_PER_RUN = 3;
+let articlesMade = 0;
+const timeLeftMs = () => SOFT_LIMIT_MS - (Date.now() - START_TIME);
+const canMakeMore = () => articlesMade < MAX_ARTICLES_PER_RUN && timeLeftMs() > 90 * 1000;
+setTimeout(() => {
+  console.log(`time limit reached after ${Math.round((Date.now() - START_TIME) / 1000)}s, stopping`);
+  process.exit(0);
+}, HARD_LIMIT_MS).unref();
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isoDate = (d) =>
   new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
@@ -92,19 +109,30 @@ async function geminiOnce(prompt, { search = false, image = null } = {}, model =
   if (search) body.tools = [{ google_search: {} }];
   else body.generationConfig = { responseMimeType: "application/json" };
 
+  if (Date.now() - START_TIME > HARD_LIMIT_MS - 30000) {
+    throw new Error("Gemini is busy or the limit is used up. Last reply: out of time");
+  }
   let lastError = "";
-  for (let i = 0; i < 3; i++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY,
-      },
-      body: JSON.stringify(body),
-    });
+  for (let i = 0; i < 2; i++) {
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(45000), // a stuck request must never hang the job
+      });
+    } catch (e) {
+      lastError = `no answer: ${e.message}`;
+      await sleep(4000);
+      continue;
+    }
     if (res.status === 429 || res.status >= 500) {
       lastError = `${res.status}: ${(await res.text()).slice(0, 400)}`;
-      await sleep(20000 * (i + 1));
+      await sleep(6000 * (i + 1));
       continue;
     }
     if (!res.ok) {
@@ -145,13 +173,14 @@ function parseJson(text) {
 const FORMAT_RULES = `- In your own original wording. Never copy sentences from any source and never quote people.
 - "body" is HTML using only <p>, <h2>, <strong>, <ul> and <li>. No <h1>, no images, no links.
 - READABILITY: write SHORT paragraphs. Every <p> has 1 to 3 sentences and about 40 words at most, never more. Sentences average about 20 words or fewer, in plain simple words. Break each <h2> section into several short paragraphs so it is easy to read on a phone.
+- The article body must be MORE THAN 300 words, whatever the topic.
 - The TITLE MUST be 50 to 60 characters long counting every letter and space (never more than 60, never fewer than 40) and MUST contain the exact focus keyword phrase, ideally near the start. The subtitle and the metaDescription must contain it too. This is the most important rule.
 - KEYWORD DENSITY: the exact focus keyword phrase must appear in the body text about once every 55 to 65 words (a density of 1.5% to 1.9%) and NEVER above 2.0%, whatever the article's length. Do NOT change how long the article is to reach this; keep the length asked for above. Use it in the first paragraph, in a few <h2> headings, and spread evenly. NEVER put it in every paragraph: at most once per paragraph, and at least a third of the paragraphs must not contain it. In the other paragraphs use a pronoun or a short form instead (for example "he", "the club", "the award"). Do not count the title.
 - "snippet": the first one or two sentences as plain text, at most 200 characters.
 - "metaDescription": plain text, at most 155 characters, containing the focus keyword.
 - "tags": 3 to 6 short lowercase tags.
 - "imageAlt": a short description of a suitable image.
-- "mainSubject": the ONE person, club, national team or stadium the article is mostly about, as a real name that photographers would label (for example "Cristiano Ronaldo" or "Manchester City"). The featured photo will be of this subject, so name it precisely.
+- "mainSubject": the ONE person, club, national team or stadium the article is mostly about, as a real name that photographers would label (for example "Cristiano Ronaldo" or "Manchester City"). The featured photo will be of this subject, so name it precisely. If the article is about a general topic with no single subject (for example club captains), use the most important example person or club from the article as the mainSubject.
 - "otherSubjects": up to 2 other specific people, clubs or stadiums that the article discusses BY NAME in its body (for example players or managers given as examples). Use their full real names exactly as written in the body. An empty list is fine; never invent names that are not in the body.`;
 
 const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": []}`;
@@ -221,7 +250,7 @@ async function commonsQuery(params, label) {
           iiurlwidth: "1200",
           ...params,
         }),
-      { headers: { "User-Agent": WIKI_UA } }
+      { headers: { "User-Agent": WIKI_UA }, signal: AbortSignal.timeout(20000) }
     );
     if (!res.ok) {
       console.log(`${label}: HTTP ${res.status}`);
@@ -274,6 +303,10 @@ function toCandidate(p, subject, { lead = false } = {}) {
     inName,
     lead,
     file: p.title,
+    about: [fileName, cats.join(", "), decode(String(meta.ImageDescription?.value ?? ""))]
+      .filter(Boolean)
+      .join(" | ")
+      .slice(0, 400),
     credit: `${artist}, ${license} (Wikimedia Commons)`,
     creditHtml: `<a href="${page}">${esc(artist)}</a>, ${esc(license)} (Wikimedia Commons)`,
   };
@@ -321,7 +354,7 @@ async function wikipediaLeadCandidates(subject) {
           prop: "pageimages",
           piprop: "name",
         }),
-      { headers: { "User-Agent": WIKI_UA } }
+      { headers: { "User-Agent": WIKI_UA }, signal: AbortSignal.timeout(20000) }
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -352,7 +385,7 @@ async function openversePhotos(subject) {
         category: "photograph",
         page_size: "20",
       });
-    const res = await fetch(url, { headers: { "User-Agent": WIKI_UA } });
+    const res = await fetch(url, { headers: { "User-Agent": WIKI_UA }, signal: AbortSignal.timeout(20000) });
     if (!res.ok) {
       console.log(`openverse "${subject}": HTTP ${res.status}`);
       return out;
@@ -380,6 +413,7 @@ async function openversePhotos(subject) {
         score: (inTitle ? 3 : 0) + (inTag ? 1 : 0), // always below a good Commons photo
         inName: inTitle,
         file: r.title,
+        about: String(r.title ?? ""),
         credit: `${creator}, ${licName} (${where})`,
         creditHtml: `<a href="${page}">${esc(creator)}</a>, ${esc(licName)} (${esc(where)})`,
       });
@@ -397,25 +431,27 @@ async function openversePhotos(subject) {
 // not try to recognise anybody by their face: who is in the photo comes from
 // the photo's own labels (checked above), while Gemini checks the kind of
 // picture and writes a true description for the alt text.
-const MAX_PHOTO_CHECKS = 8;
+const MAX_PHOTO_CHECKS = 3;   // photos shown to Gemini per subject
 const MAX_OTHER_SUBJECTS = 2; // other named people or clubs that may get a photo
 const MAX_BODY_IMAGES = 2;    // photos inside the article body (plus 1 featured = 3 in total)
 
-function visionPrompt(subject) {
-  return `An article about "${subject}" needs a photo. Look at the image carefully.
+function visionPrompt(subject, photo, context) {
+  return `An article titled "${context || subject}" is about "${subject}" and needs a photo. Look at the image carefully.
+
+The photo's own labels on Wikimedia (written by people who saw it): ${photo.about || "none"}
 
 Answer ONLY with a JSON object:
-{"description": "", "isPhotograph": true, "mainFocus": "", "suitable": true, "reason": ""}
+{"altText": "", "isPhotograph": true, "mainFocus": "", "suitable": true, "reason": ""}
 
-- description: one plain factual sentence (under 100 characters) saying what the image shows, for example "A footballer in a blue shirt controls the ball". Name a person only if their name is written in the image.
+- altText: a natural photo caption used as the image's alt text, 8 to 18 words, saying who or what the photo is about and what is happening. Start with "${subject}" when the photo is about that person or club, then describe the scene. Good examples: "Martin Ødegaard celebrates with Arsenal teammates after lifting a trophy" and "Erling Haaland shoots for Manchester City in a sky blue kit". Use the labels above for names of clubs, events or other people, but ONLY when they fit what you can see. Describe what is really visible: the action (celebrating, shooting, tackling, speaking, walking out), teammates or opponents, a trophy, the stadium or the crowd, the kit colours. NEVER write vague phrases such as "a man standing" or "a man wearing a red shirt". Never invent a score, a competition or a date that is not in the labels or the image.
 - isPhotograph: false for logos, drawings, maps, screenshots and graphics.
 - mainFocus: one of "person", "group of people", "stadium", "crowd", "object", "other".
-- suitable: true ONLY if this is a good, relevant photo for an article about "${subject}". If the subject is a person (a player, manager or other individual), the main focus must be a person, ideally in a football setting, NOT boots, a ball, a trophy, a logo, a scoreboard or a crowd. If the subject is a club or national team, the image should show its players, kit, badge or stadium. If the subject is a stadium, it must show a stadium. If a name or number written in the image clearly contradicts the subject, suitable is false.
-- Do NOT try to recognise anyone by their face. If you cannot tell who someone is from writing in the image, judge only whether the type of image fits.
+- suitable: true ONLY if this is a good, relevant photo for an article about "${subject}". If the subject is a person (a player, manager or other individual), the main focus must be a person or a group that includes them, ideally in a football setting, NOT boots, a ball, a trophy on its own, a logo, a scoreboard or a crowd. If the subject is a club or national team, the image should show its players, kit, badge or stadium. If the subject is a stadium, it must show a stadium. If a name or number written in the image clearly contradicts the subject, suitable is false.
+- Do NOT try to recognise anyone by their face. The names come from the labels and the article, not from faces. If you cannot tell who someone is, judge only whether the type of image fits.
 - reason: a few words.`;
 }
 
-async function checkPhoto(photo, subject) {
+async function checkPhoto(photo, subject, context) {
   try {
     const res = await fetch(photo.url, {
       headers: { "User-Agent": WIKI_UA },
@@ -425,7 +461,7 @@ async function checkPhoto(photo, subject) {
     const mime = (res.headers.get("content-type") || "image/jpeg").split(";")[0];
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > 4_000_000) return { error: "image too large to check" };
-    const { text } = await gemini(visionPrompt(subject), {
+    const { text } = await gemini(visionPrompt(subject, photo, context), {
       image: { mime, data: buf.toString("base64") },
     });
     return parseJson(text);
@@ -442,40 +478,52 @@ function composeAlt(subject, description) {
   return alt.slice(0, 125);
 }
 
-// Shows each candidate photo to Gemini, best-scoring first, and keeps the
-// ones that really fit, until `count` are found.
-async function pickVerified(candidates, subject, count, state) {
+// File names that say the picture is of a thing, not a person. Used only
+// when Gemini cannot look at a photo (see pickVerified).
+const OBJECT_WORDS = /\b(boots?|shoes?|ball|logo|badge|crest|trophy|crowd|stands|flag|shirt|jersey|kit|poster|stamp|statue|mural|autograph)\b/i;
+const UNCHECKED_MIN_SCORE = 9; // name in the file name AND in an exact category, at least
+
+// Shows the best-scoring candidates to Gemini (a few at a time, in
+// parallel) and keeps the ones that really fit, until `count` are found.
+//
+// If Gemini cannot look at a photo (busy, or the picture would not load),
+// the photo is used only when it is an exceptionally strong match: the full
+// name in its file name and in an exact category, and no object word such as
+// "boots" in the file name. Anything weaker is skipped.
+async function pickVerified(candidates, subject, count, state, context) {
   const accepted = [];
-  for (const c of candidates) {
-    if (accepted.length >= count || state.checks >= MAX_PHOTO_CHECKS) break;
-    state.checks++;
-    const v = await checkPhoto(c, subject);
-    if (v.error) {
-      // Gemini could not look at it (busy, or the image would not load).
-      // An unchecked photo is never used: no photo is better than a wrong one.
-      console.log(`  could not check ${c.file}: ${v.error}`);
-      continue;
-    }
-    if (v.suitable === true && v.isPhotograph !== false) {
-      accepted.push({ ...c, alt: composeAlt(subject, v.description) });
-    } else {
-      console.log(`  rejected ${c.file}: ${v.mainFocus ?? "?"} (${v.reason ?? "not suitable"})`);
-    }
+  let i = 0;
+  while (accepted.length < count && i < candidates.length && state.checks < MAX_PHOTO_CHECKS) {
+    const room = MAX_PHOTO_CHECKS - state.checks;
+    const batch = candidates.slice(i, i + Math.min(3, room));
+    i += batch.length;
+    state.checks += batch.length;
+    const results = await Promise.all(batch.map((c) => checkPhoto(c, subject, context)));
+    batch.forEach((c, k) => {
+      const v = results[k];
+      if (v.error) {
+        const strong =
+          c.inName && c.score >= UNCHECKED_MIN_SCORE && !OBJECT_WORDS.test(String(c.file ?? ""));
+        console.log(`  could not check ${c.file}: ${v.error}${strong ? " - used anyway (very strong match)" : ""}`);
+        if (strong) accepted.push({ ...c, alt: subject });
+      } else if (v.suitable === true && v.isPhotograph !== false) {
+        accepted.push({ ...c, alt: composeAlt(subject, v.altText || v.description) });
+      } else {
+        console.log(`  rejected ${c.file}: ${v.mainFocus ?? "?"} (${v.reason ?? "not suitable"})`);
+      }
+    });
   }
-  return accepted;
+  return accepted.slice(0, count);
 }
 
 // Up to `count` DIFFERENT photos of `subject`, best first (the first one is
 // used as the featured image). Each one has been looked at by Gemini.
 // Fewer, or none, is fine: a missing photo is better than a wrong one.
-async function findImages(subject, { era = "any", count = 3 } = {}) {
+async function findImages(subject, { era = "any", count = 3, context = "" } = {}) {
   const thisYear = new Date().getUTCFullYear();
   // For current stories, also search with the current and previous year:
   // file names on Commons often carry the year.
-  const terms =
-    era === "current"
-      ? [`${subject} ${thisYear}`, `${subject} ${thisYear - 1}`, subject]
-      : [subject, `${subject} portrait`];
+  const terms = era === "current" ? [`${subject} ${thisYear}`, subject] : [subject];
 
   const pool = new Map(); // url -> candidate
   const add = (list) => {
@@ -484,9 +532,13 @@ async function findImages(subject, { era = "any", count = 3 } = {}) {
       if (!old || c.score > old.score) pool.set(c.url, c);
     }
   };
-  add(await wikipediaLeadCandidates(subject));
-  add(await commonsCategoryCandidates(subject));
-  for (const term of terms) add(await commonsCandidates(term, subject));
+  // All the searches run at the same time.
+  const found = await Promise.all([
+    wikipediaLeadCandidates(subject),
+    commonsCategoryCandidates(subject),
+    ...terms.map((term) => commonsCandidates(term, subject)),
+  ]);
+  for (const list of found) add(list);
 
   let list = [...pool.values()];
   if (era === "current") {
@@ -500,14 +552,14 @@ async function findImages(subject, { era = "any", count = 3 } = {}) {
   list.sort((a, b) => b.score - a.score);
 
   const state = { checks: 0 };
-  let photos = await pickVerified(list, subject, count, state);
+  let photos = await pickVerified(list, subject, count, state, context);
 
   if (era !== "current" && photos.length < count) {
     const have = new Set(list.map((p) => p.url));
     const more = (await openversePhotos(subject))
       .filter((c) => !have.has(c.url))
       .sort((a, b) => b.score - a.score);
-    photos = photos.concat(await pickVerified(more, subject, count - photos.length, state));
+    photos = photos.concat(await pickVerified(more, subject, count - photos.length, state, context));
   }
   console.log(
     `images for "${subject}" (${era}): found ${photos.length} of ${count}` +
@@ -681,9 +733,9 @@ This is all you know about the story. Write an original, detailed article about 
 
 RULES:
 - First decide whether this is clearly about football (soccer) as a sport: a match, club, player, manager, transfer, competition or national team. If it is NOT (for example health, charity, other sports or general news), return ONLY {"isFootball": false} and nothing else.
-- 400 to 600 words.
+- 400 to 600 words, and NEVER fewer than 350.
 - Answer who, what, when, where and why. Be specific: use the names, numbers, scores and dates found in the headlines and source notes. If they explain WHY something is happening, explain it clearly. If the date or time of the event is given, state it in the first paragraph; if it is not given, do not guess it.
-- Use ONLY the facts in the headlines and source notes, plus well-established background you are completely sure of. Never invent scores, quotes, transfers, injuries, numbers or dates. If something is not known, leave it out and write a shorter article rather than guess.
+- Use ONLY the facts in the headlines and source notes, plus well-established background you are completely sure of. Never invent scores, quotes, transfers, injuries, numbers or dates. If something is not known, leave it out and never guess; still reach at least 350 words by explaining the background and context you are completely sure of.
 - Rewrite everything completely in your own words. Never copy sentences from the notes and never quote people.
 - The focus keyword must be exactly: ${t.term}
 - Choose one of these categories: ${CATEGORY_HELP}
@@ -1133,6 +1185,87 @@ Return ONLY a JSON object: {"title": ""}`
   return a;
 }
 
+// ---------- Article length: always more than 300 words ----------
+const MIN_WORDS = 320;        // anything shorter is expanded
+const EXPAND_TO_WORDS = 380;  // the expansion aims for this or a bit more
+const wordCount = (html) => {
+  const t = plainText(html);
+  return t ? t.split(" ").length : 0;
+};
+
+async function ensureLength(a) {
+  for (let i = 0; i < 2; i++) {
+    const n = wordCount(a.body);
+    if (n >= MIN_WORDS) return a;
+    console.log(`article has only ${n} words, expanding (try ${i + 1})`);
+    try {
+      const { text } = await gemini(`Below is a football article body (HTML) that is too short (${n} words). Expand it to between ${EXPAND_TO_WORDS} and ${EXPAND_TO_WORDS + 150} words.
+
+RULES:
+- Add useful explanation, context and detail. Use ONLY the facts already in the article, plus well-established background you are completely sure of. Do NOT add new scores, numbers, dates, quotes, names, transfers or events.
+- Keep the focus keyword "${a.focusKeyword}" where it already appears, and use it about once every 55 to 65 words, never in every paragraph.
+- Short paragraphs: 1 to 3 sentences each. Use only <p>, <h2>, <strong>, <ul> and <li>.
+
+BODY:
+${a.body}
+
+Return ONLY a JSON object: {"body": ""}`);
+      const r = parseJson(text);
+      if (typeof r.body === "string" && wordCount(r.body) > n) a.body = r.body;
+    } catch (e) {
+      console.log(`length fix failed: ${e.message}`);
+      break;
+    }
+  }
+  const n = wordCount(a.body);
+  if (n < MIN_WORDS) console.log(`warning: the article still has only ${n} words`);
+  return a;
+}
+
+// ---------- Meta description (max 155 characters) and snippet (max 200) ----------
+const META_MAX = 155;
+const SNIPPET_MAX = 200;
+
+// Cuts text at a word boundary so it is no longer than `max` characters.
+function cutAtWord(text, max) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max + 1);
+  return cut.slice(0, cut.lastIndexOf(" ")).replace(/[\s,;:\-–—]+$/, "");
+}
+
+async function fitMeta(a) {
+  const kw = a.focusKeyword.trim();
+  const good = (t) =>
+    typeof t === "string" && t.length >= 50 && t.length <= META_MAX && hasPhrase(t, kw);
+
+  for (let i = 0; i < 2 && !good(a.metaDescription); i++) {
+    console.log(`meta description is ${a.metaDescription.length} characters, fixing`);
+    try {
+      const { text } = await gemini(`Rewrite this football article's meta description so it is between 130 and 155 characters long, counting every letter and space (NEVER more than 155). It must contain the exact phrase "${kw}", read as one or two natural sentences, and promise what the article covers. Do not add new facts.
+
+CURRENT (${a.metaDescription.length} characters): ${a.metaDescription}
+ARTICLE TITLE: ${a.title}
+ARTICLE OPENING: ${plainText(a.body).slice(0, 300)}
+
+Return ONLY a JSON object: {"metaDescription": ""}`);
+      const t = parseJson(text).metaDescription;
+      if (good(t)) a.metaDescription = t.trim();
+    } catch (e) {
+      console.log(`meta fix failed: ${e.message}`);
+      break;
+    }
+  }
+  // Last resort: cut it, keeping the keyword.
+  if (a.metaDescription.length > META_MAX) {
+    let cut = cutAtWord(a.metaDescription, META_MAX);
+    if (!hasPhrase(cut, kw)) cut = cutAtWord(`${kw}: ${cut}`, META_MAX);
+    a.metaDescription = cut.endsWith(".") ? cut : `${cut}.`.slice(0, META_MAX);
+    console.log(`meta description cut to ${a.metaDescription.length} characters`);
+  }
+  if (a.snippet.length > SNIPPET_MAX) a.snippet = `${cutAtWord(a.snippet, SNIPPET_MAX - 1)}.`;
+  return a;
+}
+
 // ---------- Saving a draft ----------
 async function saveDraft(a, extra) {
   for (const k of ["title", "body", "snippet", "metaDescription", "focusKeyword"]) {
@@ -1140,8 +1273,10 @@ async function saveDraft(a, extra) {
       throw new Error(`Gemini's result is missing "${k}"`);
     }
   }
+  a = await ensureLength(a);
   a = await fixDensity(a);
   a = await ensureKeywordPlacement(a);
+  a = await fitMeta(a);
   a = await fitTitle(a);
 
   const category = CATEGORIES.includes(extra.category)
@@ -1163,7 +1298,7 @@ async function saveDraft(a, extra) {
   ).trim();
   // Photos of the main subject: the best is the featured image.
   const mainPhotos = subject
-    ? await findImages(subject, { era, count: image ? 1 : 2 })
+    ? await findImages(subject, { era, count: image ? 1 : 2, context: a.title })
     : [];
   if (!image && mainPhotos.length) {
     const featured = mainPhotos.shift();
@@ -1184,9 +1319,20 @@ async function saveDraft(a, extra) {
     .filter((n) => n && !hasPhrase(n, subject) && !hasPhrase(subject, n))
     .filter((n) => mentionsName(plainText(a.body), n))
     .slice(0, MAX_OTHER_SUBJECTS);
-  for (const name of names) {
-    const found = await findImages(name, { era, count: 1 });
+  for (const name of timeLeftMs() > 150 * 1000 ? names : []) {
+    const found = await findImages(name, { era, count: 1, context: a.title });
     if (found[0]) others.push({ ...found[0], subject: name });
+  }
+  if (!image && others.length) {
+    // The article has no single subject with a photo (club captains, for
+    // example), so the best photo of one of the examples it names becomes
+    // the featured image.
+    const first = others.shift();
+    image = first.url;
+    imageCredit = first.credit;
+    imageSource = first.page;
+    imageAlt = first.alt;
+    bodyHtml = `<p><small>Photo: ${first.creditHtml}</small></p>` + bodyHtml;
   }
   const bodyPhotos = [...others, ...mainPhotos].slice(0, MAX_BODY_IMAGES);
   bodyHtml = addBodyImages(bodyHtml, bodyPhotos);
@@ -1236,6 +1382,7 @@ async function saveDraft(a, extra) {
       source: extra.source,
       sources: extra.sources ?? [],
       keywordDensity: a.keywordDensity ?? null,
+      words: wordCount(a.body),
       imageCredit,
       imageSource,
       ideaId: extra.ideaId ?? null,
@@ -1243,6 +1390,8 @@ async function saveDraft(a, extra) {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     },
   });
+  articlesMade++;
+  console.log(`  (article ${articlesMade} of at most ${MAX_ARTICLES_PER_RUN} this run, ${Math.round((Date.now() - START_TIME) / 1000)}s in)`);
   return ref;
 }
 
@@ -1318,7 +1467,7 @@ function matchScore(f) {
 }
 
 async function makeMatchDrafts() {
-  if (!AUTO_MATCH) return;
+  if (!AUTO_MATCH || !canMakeMore()) return;
   const { madeToday, pending } = await draftCounts(["match_report", "match_preview"]);
   if (pending >= MAX_PENDING) {
     console.log(`match: ${pending} drafts are waiting for review, skipping`);
@@ -1370,7 +1519,7 @@ async function makeMatchDrafts() {
   let checked = 0;
   let failures = 0;
   for (const [kind, f] of jobs) {
-    if (made >= howMany || checked >= 40 || failures >= 2) break;
+    if (made >= howMany || checked >= 40 || failures >= 2 || !canMakeMore()) break;
     checked++;
     const id = f.fixture.id;
     const key = `${kind}_${id}`;
@@ -1546,7 +1695,7 @@ Return ONLY a JSON object: {"fresh": []}`);
 }
 
 async function makeTrendingDrafts() {
-  if (TRENDING === "off") return;
+  if (TRENDING === "off" || !canMakeMore()) return;
   const { madeToday, pending } = await draftCounts(["trending"]);
   if (pending >= MAX_PENDING) {
     console.log(`trending: ${pending} drafts are waiting for review, skipping`);
@@ -1561,7 +1710,7 @@ async function makeTrendingDrafts() {
   // Paid mode: Gemini searches Google itself (needs billing on Google).
   if (TRENDING === "search") {
     const avoid = await recentTitles();
-    for (let i = 0; i < howMany; i++) {
+    for (let i = 0; i < howMany && canMakeMore(); i++) {
       try {
         const { text, sources } = await gemini(trendingPrompt(avoid), { search: true });
         const a = parseJson(text);
@@ -1590,7 +1739,7 @@ async function makeTrendingDrafts() {
   let made = 0;
   let failures = 0;
   for (const t of trends) {
-    if (made >= howMany || failures >= 2) break;
+    if (made >= howMany || failures >= 2 || !canMakeMore()) break;
     const key = `trend_${slug(t.term)}`;
     const seen = await db.doc(`${LOG}/${key}`).get();
     if (seen.exists) {
@@ -1631,7 +1780,7 @@ async function makeTrendingDrafts() {
 
 // ---------- 3b) Evergreen drafts ----------
 async function makeEvergreenDrafts() {
-  if (!EVERGREEN) return;
+  if (!EVERGREEN || !canMakeMore()) return;
   const { madeToday, pending } = await draftCounts(["evergreen"]);
   if (pending >= MAX_PENDING) {
     console.log(`evergreen: ${pending} drafts are waiting for review, skipping`);
@@ -1643,7 +1792,7 @@ async function makeEvergreenDrafts() {
     return;
   }
   const avoid = await recentTitles();
-  for (let i = 0; i < howMany; i++) {
+  for (let i = 0; i < howMany && canMakeMore(); i++) {
     try {
       const { text } = await gemini(evergreenPrompt(avoid));
       const a = parseJson(text);
@@ -1670,6 +1819,7 @@ async function makeNoteDrafts() {
     .get();
 
   for (const doc of snap.docs) {
+    if (!canMakeMore()) break;
     const idea = doc.data();
     try {
       if (!idea.topic && !idea.keyword) {
@@ -1706,9 +1856,17 @@ async function makeNoteDrafts() {
 
 await publishApproved();
 await cleanupPublishedDrafts();
-await makeMatchDrafts();
-await makeTrendingDrafts();
-await makeEvergreenDrafts();
+
+// Your own keyword notes always go first. The other three kinds then take
+// turns at the front, so with only a few articles per run, each kind still
+// gets its share over the day.
 await makeNoteDrafts();
-console.log("Articles job done");
+const turn = [makeMatchDrafts, makeTrendingDrafts, makeEvergreenDrafts];
+const start = Math.floor(Date.now() / (2 * 3600 * 1000)) % turn.length;
+for (let k = 0; k < turn.length; k++) {
+  await turn[(start + k) % turn.length]();
+}
+console.log(
+  `Articles job done: ${articlesMade} article(s) in ${Math.round((Date.now() - START_TIME) / 1000)}s`
+);
 process.exit(0);
