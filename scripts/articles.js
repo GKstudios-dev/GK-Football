@@ -181,9 +181,11 @@ const FORMAT_RULES = `- In your own original wording. Never copy sentences from 
 - "tags": 3 to 6 short lowercase tags.
 - "imageAlt": a short description of a suitable image.
 - "mainSubject": the ONE person, club, national team or stadium the article is mostly about, as a real name that photographers would label (for example "Cristiano Ronaldo" or "Manchester City"). The featured photo will be of this subject, so name it precisely. If the article is about a general topic with no single subject (for example club captains), use the most important example person or club from the article as the mainSubject.
+- "subjectKind": "person" if the mainSubject is one person, "group" for a club, national team or squad, "place" for a stadium or city.
+- "photoYears": normally an empty list []. If the article is mostly about a PAST time (a former player's or manager's career, a memoir, a famous old match, an old rivalry), give two years [from, to] covering that time, for example [1993, 2005] for a player's playing days, so photos from that time are used instead of new ones.
 - "otherSubjects": up to 2 other specific people, clubs or stadiums that the article discusses BY NAME in its body (for example players or managers given as examples). Use their full real names exactly as written in the body. An empty list is fine; never invent names that are not in the body.`;
 
-const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": []}`;
+const JSON_SHAPE = `{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "subjectKind": "", "otherSubjects": [], "photoYears": []}`;
 
 // ---------- Images (free-licensed, with credit) ----------
 // Every photo in an article is a photo of the article's MAIN SUBJECT (for
@@ -431,7 +433,7 @@ async function openversePhotos(subject) {
 // not try to recognise anybody by their face: who is in the photo comes from
 // the photo's own labels (checked above), while Gemini checks the kind of
 // picture and writes a true description for the alt text.
-const MAX_PHOTO_CHECKS = 3;   // photos shown to Gemini per subject
+const MAX_PHOTO_CHECKS = 5;   // photos shown to Gemini per subject
 const MAX_OTHER_SUBJECTS = 2; // other named people or clubs that may get a photo
 const MAX_BODY_IMAGES = 2;    // photos inside the article body (plus 1 featured = 3 in total)
 
@@ -501,6 +503,7 @@ async function pickVerified(candidates, subject, count, state, context) {
     const results = await Promise.all(batch.map((c) => checkPhoto(c, subject, context)));
     batch.forEach((c, k) => {
       const v = results[k];
+      if (!v.error) c.v = v; // kept for a second look, see findImages
       if (v.error) {
         const strong =
           c.inName && c.score >= UNCHECKED_MIN_SCORE && !OBJECT_WORDS.test(String(c.file ?? ""));
@@ -519,11 +522,23 @@ async function pickVerified(candidates, subject, count, state, context) {
 // Up to `count` DIFFERENT photos of `subject`, best first (the first one is
 // used as the featured image). Each one has been looked at by Gemini.
 // Fewer, or none, is fine: a missing photo is better than a wrong one.
-async function findImages(subject, { era = "any", count = 3, context = "" } = {}) {
+async function findImages(
+  subject,
+  { era = "any", count = 3, context = "", period = null, allowOlder = false } = {}
+) {
   const thisYear = new Date().getUTCFullYear();
   // For current stories, also search with the current and previous year:
   // file names on Commons often carry the year.
-  const terms = era === "current" ? [`${subject} ${thisYear}`, subject] : [subject];
+  // `period` is [from, to] when the article is about a PAST time (a former
+  // player's or manager's career, a memoir, a famous old match): photos from
+  // that time are wanted, not new ones. `allowOlder` lets a person's older
+  // photos be used when there are not enough recent ones.
+  const terms =
+    era === "current"
+      ? period
+        ? [subject, `${subject} ${Math.round((period[0] + period[1]) / 2)}`]
+        : [`${subject} ${thisYear}`, subject]
+      : [subject];
 
   const pool = new Map(); // url -> candidate
   const add = (list) => {
@@ -541,25 +556,69 @@ async function findImages(subject, { era = "any", count = 3, context = "" } = {}
   for (const list of found) add(list);
 
   let list = [...pool.values()];
-  if (era === "current") {
-    // Recent photos only, newest strongly preferred. A Wikipedia lead photo
-    // with no date is allowed.
-    list = list.filter((c) => (c.year ? c.year >= thisYear - MAX_PHOTO_AGE_YEARS : c.lead));
+  const dated = (c) => c.year || c.lead; // a photo with no known date is only used if it is Wikipedia's lead photo
+  if (era === "current" && period) {
+    // A story about the past: photos from that time score higher. Newer
+    // photos are not excluded, but they get no extra credit.
+    const [from, to] = period;
+    list = list.filter(dated);
     for (const c of list) {
+      if (c.year && c.year >= from - 2 && c.year <= to + 2) c.score += 4;
+    }
+  } else if (era === "current") {
+    // Recent photos first, the newest strongly preferred. If there are not
+    // enough of them and older photos are allowed (a person), the older ones
+    // follow, the newest of them first, so an old photo is only used when
+    // there is no recent one.
+    const isRecent = (c) => (c.year ? c.year >= thisYear - MAX_PHOTO_AGE_YEARS : c.lead);
+    const recent = list.filter(isRecent);
+    for (const c of recent) {
       if (c.year) c.score += Math.max(0, 1 - (thisYear - c.year) / (MAX_PHOTO_AGE_YEARS + 1)) * 4;
     }
+    recent.sort((a, b) => b.score - a.score);
+    let older = [];
+    if (allowOlder) {
+      older = list.filter((c) => !isRecent(c) && c.year).sort((a, b) => b.score - a.score);
+      if (older.length && recent.length < count) {
+        console.log(`  no recent photos of "${subject}" (${recent.length}), using older ones`);
+      }
+    }
+    list = recent.concat(older);
   }
-  list.sort((a, b) => b.score - a.score);
+  if (!(era === "current" && !period)) list.sort((a, b) => b.score - a.score);
 
   const state = { checks: 0 };
   let photos = await pickVerified(list, subject, count, state, context);
 
-  if (era !== "current" && photos.length < count) {
+  // Openverse as well, for every kind of article. It does not say when a photo
+  // was taken, and that does not matter here: the photo only has to be of the
+  // subject. It is used when Wikimedia did not give enough.
+  let more = [];
+  if (photos.length < count) {
     const have = new Set(list.map((p) => p.url));
-    const more = (await openversePhotos(subject))
+    more = (await openversePhotos(subject))
       .filter((c) => !have.has(c.url))
       .sort((a, b) => b.score - a.score);
     photos = photos.concat(await pickVerified(more, subject, count - photos.length, state, context));
+  }
+
+  // A second look, before falling back to the default image. Photos Gemini
+  // has already seen but marked "not suitable" are accepted if it still says
+  // they are a real photograph of a person, a group of people or a stadium.
+  // Boots, logos, graphics, crowds and other objects stay out. No new Gemini
+  // calls are needed: the answers from the first look are reused.
+  if (photos.length < count) {
+    const taken = new Set(photos.map((p) => p.url));
+    for (const c of [...list, ...more]) {
+      if (photos.length >= count) break;
+      const v = c.v;
+      if (taken.has(c.url) || !v) continue;
+      if (v.isPhotograph !== false && ["person", "group of people", "stadium"].includes(v.mainFocus)) {
+        photos.push({ ...c, alt: composeAlt(subject, v.altText || v.description) });
+        taken.add(c.url);
+        console.log(`  accepted ${c.file} on a second look (${v.mainFocus}; first look said: ${v.reason ?? "?"})`);
+      }
+    }
   }
   console.log(
     `images for "${subject}" (${era}): found ${photos.length} of ${count}` +
@@ -667,7 +726,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": [], "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "subjectKind": "", "otherSubjects": [], "photoYears": [], "category": ""}`;
 }
 
 function evergreenPrompt(avoidTitles) {
@@ -686,7 +745,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": [], "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "subjectKind": "", "otherSubjects": [], "photoYears": [], "category": ""}`;
 }
 
 // Reads the text of the news pages linked to a trend, so the article can
@@ -742,7 +801,7 @@ RULES:
 ${FORMAT_RULES}
 
 Return ONLY a JSON object with exactly these keys:
-{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "otherSubjects": [], "category": ""}`;
+{"title": "", "subtitle": "", "body": "", "snippet": "", "metaDescription": "", "focusKeyword": "", "tags": [], "imageAlt": "", "mainSubject": "", "subjectKind": "", "otherSubjects": [], "photoYears": [], "category": ""}`;
 }
 
 function matchPrompt(kind, f, facts) {
@@ -1293,12 +1352,24 @@ async function saveDraft(a, extra) {
   let imageAlt = extra.imageAlt || a.imageAlt || "";
   let bodyHtml = a.body;
   const era = extra.era ?? "any";
+  // Years the photos should come from, when the article is about the past.
+  const thisYear = new Date().getUTCFullYear();
+  const years = (Array.isArray(a.photoYears) ? a.photoYears : [])
+    .map(Number)
+    .filter((y) => Number.isFinite(y) && y >= 1900 && y <= thisYear + 1);
+  const period = years.length >= 2 ? [Math.min(...years), Math.max(...years)] : null;
   const subject = String(
     a.mainSubject || a.imageSearches?.[0] || a.imageSearch || ""
   ).trim();
   // Photos of the main subject: the best is the featured image.
   const mainPhotos = subject
-    ? await findImages(subject, { era, count: image ? 1 : 2, context: a.title })
+    ? await findImages(subject, {
+        era,
+        count: image ? 1 : 2,
+        context: a.title,
+        period,
+        allowOlder: true,
+      })
     : [];
   if (!image && mainPhotos.length) {
     const featured = mainPhotos.shift();
@@ -1320,7 +1391,7 @@ async function saveDraft(a, extra) {
     .filter((n) => mentionsName(plainText(a.body), n))
     .slice(0, MAX_OTHER_SUBJECTS);
   for (const name of timeLeftMs() > 150 * 1000 ? names : []) {
-    const found = await findImages(name, { era, count: 1, context: a.title });
+    const found = await findImages(name, { era, count: 1, context: a.title, period, allowOlder: true });
     if (found[0]) others.push({ ...found[0], subject: name });
   }
   if (!image && others.length) {
